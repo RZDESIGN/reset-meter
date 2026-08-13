@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Show Swift version
+        run: xcrun swift --version
+      - name: Run tests
+        run: swift test
+
+  universal-app:
+    name: Build universal app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        run: ./scripts/build-app.sh
+      - name: Verify architectures and signature
+        run: |
+          lipo -archs "dist/Reset Meter.app/Contents/MacOS/ResetMeter"
+          codesign --verify --deep --strict "dist/Reset Meter.app"

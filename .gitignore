@@ -1,0 +1,17 @@
+.DS_Store
+.swiftpm/
+.build/
+dist/
+work/
+
+*.dmg
+*.zip
+*.xcarchive
+*.p12
+*.cer
+*.mobileprovision
+
+.env
+.env.*
+preview*.png
+Assets/*.png
