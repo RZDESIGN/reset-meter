@@ -15,17 +15,78 @@ final class UsageStore: ObservableObject {
     private var refreshTimer: Timer?
 
     init(autoRefresh: Bool = true) {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.refresh()
-            }
-        }
-
         if autoRefresh {
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.refresh()
+                }
+            }
+
             Task { [weak self] in
                 await self?.refresh()
             }
         }
+    }
+
+    func loadDemoData(now: Date = .now) {
+        codex = ProviderUsage(
+            provider: .codex,
+            limits: [
+                UsageLimit(
+                    id: "codex-demo-weekly",
+                    label: "Weekly",
+                    usedPercent: 19,
+                    resetsAt: now.addingTimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60),
+                    durationMinutes: 10_080,
+                    displayMode: .remaining
+                ),
+            ],
+            updatedAt: now,
+            sourceDescription: "Live Codex status"
+        )
+        claude = ProviderUsage(
+            provider: .claude,
+            limits: [
+                UsageLimit(
+                    id: "claude-demo-five-hour",
+                    label: "5-hour",
+                    usedPercent: 42,
+                    resetsAt: now.addingTimeInterval(1 * 3_600 + 38 * 60 + 50),
+                    resetIsEstimated: true,
+                    durationMinutes: 300,
+                    displayMode: .remaining
+                ),
+                UsageLimit(
+                    id: "claude-demo-weekly",
+                    label: "Weekly",
+                    usedPercent: 56,
+                    resetsAt: now.addingTimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60),
+                    resetIsEstimated: true,
+                    durationMinutes: 10_080,
+                    displayMode: .remaining
+                ),
+            ],
+            updatedAt: now,
+            sourceDescription: "Claude Desktop cache"
+        )
+        cursor = ProviderUsage(
+            provider: .cursor,
+            limits: [
+                UsageLimit(
+                    id: "cursor-demo-included",
+                    label: "Composer + Grok",
+                    usedPercent: 14,
+                    resetsAt: now.addingTimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60),
+                    displayMode: .remaining
+                ),
+            ],
+            updatedAt: now,
+            sourceDescription: "Live Cursor first-party pool"
+        )
+        codexError = nil
+        claudeError = nil
+        cursorError = nil
+        lastRefresh = now
     }
 
     func menuPercent(for provider: UsageProvider) -> String {

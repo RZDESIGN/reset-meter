@@ -7,14 +7,20 @@ struct ResetMeterApp: App {
 
     init() {
         let snapshotPath = Self.snapshotPath
-        let usageStore = UsageStore(autoRefresh: snapshotPath == nil)
+        let demoSnapshotPath = Self.demoSnapshotPath
+        let outputPath = demoSnapshotPath ?? snapshotPath
+        let usageStore = UsageStore(autoRefresh: outputPath == nil)
         _store = StateObject(wrappedValue: usageStore)
 
-        if let snapshotPath {
+        if let outputPath {
             Task { @MainActor in
-                await usageStore.refresh()
+                if demoSnapshotPath != nil {
+                    usageStore.loadDemoData()
+                } else {
+                    await usageStore.refresh()
+                }
                 do {
-                    try SnapshotWriter.write(store: usageStore, to: snapshotPath)
+                    try SnapshotWriter.write(store: usageStore, to: outputPath)
                 } catch {
                     fputs("Snapshot failed: \(error.localizedDescription)\n", stderr)
                 }
@@ -33,11 +39,19 @@ struct ResetMeterApp: App {
     }
 
     private static var snapshotPath: String? {
+        argument(after: "--snapshot")
+    }
+
+    private static var demoSnapshotPath: String? {
+        argument(after: "--snapshot-demo")
+    }
+
+    private static func argument(after flag: String) -> String? {
         let arguments = CommandLine.arguments
-        guard let flag = arguments.firstIndex(of: "--snapshot"), arguments.indices.contains(flag + 1) else {
+        guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else {
             return nil
         }
-        return arguments[flag + 1]
+        return arguments[index + 1]
     }
 }
 
@@ -52,11 +66,28 @@ private enum SnapshotWriter {
         let outputURL = URL(fileURLWithPath: path)
         let menuURL = outputURL.deletingLastPathComponent()
             .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-menu.png")
-        let menuLabel = StatusLabel(store: store)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+        let menuLabel = HStack(spacing: 0) {
+            Spacer(minLength: 24)
+            StatusLabel(store: store)
+            Spacer(minLength: 24)
+        }
+            .frame(width: 640, height: 32)
             .foregroundStyle(Color.white)
-            .background(Color.black.opacity(0.82))
+            .background {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.10, green: 0.07, blue: 0.24),
+                        Color(red: 0.08, green: 0.34, blue: 0.45),
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(height: 0.5)
+            }
             .environment(\.colorScheme, .dark)
         try writePNG(menuLabel, to: menuURL)
     }

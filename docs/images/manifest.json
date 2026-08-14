@@ -1,0 +1,19 @@
+{
+  "generatedBy": "Reset Meter --snapshot-demo",
+  "data": "synthetic",
+  "scale": 2,
+  "assets": [
+    {
+      "file": "reset-meter.png",
+      "content": "usage popover",
+      "width": 768,
+      "height": 1238
+    },
+    {
+      "file": "reset-meter-menu.png",
+      "content": "compact menu-bar label",
+      "width": 1280,
+      "height": 64
+    }
+  ]
+}
