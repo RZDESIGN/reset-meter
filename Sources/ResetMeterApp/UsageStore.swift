@@ -29,60 +29,75 @@ final class UsageStore: ObservableObject {
     }
 
     func loadDemoData(now: Date = .now) {
-        codex = ProviderUsage(
+        let codexReset = now.addingTimeInterval(
+            TimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60)
+        )
+        let codexLimit = UsageLimit(
+            id: "codex-demo-weekly",
+            label: "Weekly",
+            usedPercent: 19,
+            resetsAt: codexReset,
+            durationMinutes: 10_080,
+            displayMode: .remaining
+        )
+        let codexDemo = ProviderUsage(
             provider: .codex,
-            limits: [
-                UsageLimit(
-                    id: "codex-demo-weekly",
-                    label: "Weekly",
-                    usedPercent: 19,
-                    resetsAt: now.addingTimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60),
-                    durationMinutes: 10_080,
-                    displayMode: .remaining
-                ),
-            ],
+            limits: [codexLimit],
             updatedAt: now,
             sourceDescription: "Live Codex status"
         )
-        claude = ProviderUsage(
+
+        let claudeFiveHourReset = now.addingTimeInterval(
+            TimeInterval(1 * 3_600 + 38 * 60 + 50)
+        )
+        let claudeFiveHourLimit = UsageLimit(
+            id: "claude-demo-five-hour",
+            label: "5-hour",
+            usedPercent: 42,
+            resetsAt: claudeFiveHourReset,
+            resetIsEstimated: true,
+            durationMinutes: 300,
+            displayMode: .remaining
+        )
+        let claudeWeeklyReset = now.addingTimeInterval(
+            TimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60)
+        )
+        let claudeWeeklyLimit = UsageLimit(
+            id: "claude-demo-weekly",
+            label: "Weekly",
+            usedPercent: 56,
+            resetsAt: claudeWeeklyReset,
+            resetIsEstimated: true,
+            durationMinutes: 10_080,
+            displayMode: .remaining
+        )
+        let claudeDemo = ProviderUsage(
             provider: .claude,
-            limits: [
-                UsageLimit(
-                    id: "claude-demo-five-hour",
-                    label: "5-hour",
-                    usedPercent: 42,
-                    resetsAt: now.addingTimeInterval(1 * 3_600 + 38 * 60 + 50),
-                    resetIsEstimated: true,
-                    durationMinutes: 300,
-                    displayMode: .remaining
-                ),
-                UsageLimit(
-                    id: "claude-demo-weekly",
-                    label: "Weekly",
-                    usedPercent: 56,
-                    resetsAt: now.addingTimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60),
-                    resetIsEstimated: true,
-                    durationMinutes: 10_080,
-                    displayMode: .remaining
-                ),
-            ],
+            limits: [claudeFiveHourLimit, claudeWeeklyLimit],
             updatedAt: now,
             sourceDescription: "Claude Desktop cache"
         )
-        cursor = ProviderUsage(
+
+        let cursorReset = now.addingTimeInterval(
+            TimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60)
+        )
+        let cursorLimit = UsageLimit(
+            id: "cursor-demo-included",
+            label: "Composer + Grok",
+            usedPercent: 14,
+            resetsAt: cursorReset,
+            displayMode: .remaining
+        )
+        let cursorDemo = ProviderUsage(
             provider: .cursor,
-            limits: [
-                UsageLimit(
-                    id: "cursor-demo-included",
-                    label: "Composer + Grok",
-                    usedPercent: 14,
-                    resetsAt: now.addingTimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60),
-                    displayMode: .remaining
-                ),
-            ],
+            limits: [cursorLimit],
             updatedAt: now,
             sourceDescription: "Live Cursor first-party pool"
         )
+
+        codex = codexDemo
+        claude = claudeDemo
+        cursor = cursorDemo
         codexError = nil
         claudeError = nil
         cursorError = nil
