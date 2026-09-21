@@ -3,12 +3,20 @@ set -euo pipefail
 
 project_dir="${0:A:h:h}"
 app_dir="$project_dir/dist/Reset Meter.app"
-binary="$project_dir/.build/apple/Products/Release/ResetMeter"
 generated_assets="$project_dir/.build/reset-meter-assets"
 sign_identity="${RESET_METER_SIGN_IDENTITY:--}"
 
 cd "$project_dir"
-swift build -c release --arch arm64 --arch x86_64
+build_flags=(-c release --arch arm64 --arch x86_64)
+swift build "${build_flags[@]}"
+
+# Ask the toolchain where it put the universal product: the path moved between
+# Swift releases, and a hardcoded one silently packages a stale binary.
+binary="$(swift build "${build_flags[@]}" --show-bin-path)/ResetMeter"
+if [[ ! -x "$binary" ]]; then
+    print -u2 "Release binary not found at $binary"
+    exit 1
+fi
 
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources" "$generated_assets"
 cp "$binary" "$app_dir/Contents/MacOS/ResetMeter"
@@ -32,6 +40,15 @@ if [[ "$sign_identity" == "-" ]]; then
 else
     codesign --force --deep --options runtime --timestamp --sign "$sign_identity" "$app_dir"
 fi
-codesign --verify --deep --strict "$app_dir"
+# Syncing services re-tag the bundle with Finder info between signing and
+# verification, and codesign rejects that as detritus.
+for attempt in 1 2 3; do
+    xattr -cr "$app_dir"
+    if codesign --verify --deep --strict "$app_dir"; then
+        break
+    elif (( attempt == 3 )); then
+        exit 1
+    fi
+done
 
 print "$app_dir"
