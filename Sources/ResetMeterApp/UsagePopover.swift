@@ -6,12 +6,15 @@ struct StatusLabel: View {
     @ObservedObject var store: UsageStore
 
     var body: some View {
-        Image(nsImage: MenuBarArtwork.image(
-            codexPercent: store.menuRemainingPercent(for: .codex),
-            claudePercent: store.menuRemainingPercent(for: .claude),
-            cursorPercent: store.menuRemainingPercent(for: .cursor)
-        ))
-        .renderingMode(.template)
+        Group {
+            if store.visibleEntries.isEmpty {
+                Image(systemName: "gauge")
+                    .frame(width: 18, height: 18)
+            } else {
+                Image(nsImage: MenuBarArtwork.image(groups: store.menuGroups))
+                    .renderingMode(.template)
+            }
+        }
         .fixedSize(horizontal: true, vertical: true)
         .accessibilityLabel(store.menuSummary)
     }
@@ -23,22 +26,20 @@ private enum MenuBarArtwork {
     private static let iconSize: CGFloat = 14
     private static let barSize = NSSize(width: 24, height: 5)
     private static let innerSpacing: CGFloat = 3
-    private static let providerSpacing: CGFloat = 8
+    private static let meterSpacing: CGFloat = 5
+    private static let providerSpacing: CGFloat = 11
     private static let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
 
-    static func image(codexPercent: Int?, claudePercent: Int?, cursorPercent: Int?) -> NSImage {
-        let entries: [(UsageProvider, Int?)] = [
-            (.codex, codexPercent),
-            (.claude, claudePercent),
-            (.cursor, cursorPercent),
-        ]
-        let labels = entries.map { label(for: $0.1) }
-        let widths = labels.map { ceil($0.size().width) }
-        let entryWidths = widths.map {
-            iconSize + innerSpacing + barSize.width + innerSpacing + $0
+    static func image(groups: [(provider: UsageProvider, percents: [Int?])]) -> NSImage {
+        let labels = groups.map { $0.percents.map(label(for:)) }
+        let widths = labels.map { $0.map { ceil($0.size().width) } }
+        let groupWidths = groups.indices.map { index -> CGFloat in
+            let meters = widths[index].reduce(0) { $0 + barSize.width + innerSpacing + $1 }
+            return iconSize + innerSpacing + meters
+                + meterSpacing * CGFloat(max(0, groups[index].percents.count - 1))
         }
         let totalWidth = ceil(
-            entryWidths.reduce(0, +) + providerSpacing * CGFloat(max(0, entries.count - 1))
+            groupWidths.reduce(0, +) + providerSpacing * CGFloat(max(0, groups.count - 1))
         )
 
         let image = NSImage(
@@ -46,9 +47,9 @@ private enum MenuBarArtwork {
             flipped: false
         ) { _ in
             var x: CGFloat = 0
-            for index in entries.indices {
-                let entry = entries[index]
-                if let icon = ProviderArtwork.image(for: entry.0, size: iconSize) {
+            for index in groups.indices {
+                let group = groups[index]
+                if let icon = ProviderArtwork.image(for: group.provider, size: iconSize) {
                     icon.draw(
                         in: NSRect(x: x, y: (height - iconSize) / 2, width: iconSize, height: iconSize),
                         from: .zero,
@@ -58,14 +59,20 @@ private enum MenuBarArtwork {
                 }
                 x += iconSize + innerSpacing
 
-                drawBar(percent: entry.1, at: NSPoint(x: x, y: (height - barSize.height) / 2))
-                x += barSize.width + innerSpacing
+                for meter in group.percents.indices {
+                    drawBar(percent: group.percents[meter], at: NSPoint(x: x, y: (height - barSize.height) / 2))
+                    x += barSize.width + innerSpacing
 
-                let label = labels[index]
-                label.draw(at: NSPoint(x: x, y: floor((height - label.size().height) / 2)))
-                x += widths[index]
+                    let label = labels[index][meter]
+                    label.draw(at: NSPoint(x: x, y: floor((height - label.size().height) / 2)))
+                    x += widths[index][meter]
 
-                if index < entries.index(before: entries.endIndex) {
+                    if meter < group.percents.index(before: group.percents.endIndex) {
+                        x += meterSpacing
+                    }
+                }
+
+                if index < groups.index(before: groups.endIndex) {
                     x += providerSpacing
                 }
             }
@@ -105,38 +112,52 @@ private enum MenuBarArtwork {
 
 struct UsagePopover: View {
     @ObservedObject var store: UsageStore
+    @State private var contentHeight: CGFloat = 0
+
+    private static let maximumListHeight: CGFloat = 600
 
     var body: some View {
         VStack(spacing: 12) {
             header
 
-            ProviderCard(
-                provider: .codex,
-                usage: store.codex,
-                error: store.codexError,
-                tint: Color(red: 0.20, green: 0.48, blue: 0.98),
-                iconTint: .primary
-            )
-
-            ProviderCard(
-                provider: .claude,
-                usage: store.claude,
-                error: store.claudeError,
-                tint: Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
-            )
-
-            ProviderCard(
-                provider: .cursor,
-                usage: store.cursor,
-                error: store.cursorError,
-                tint: Color(red: 0.48, green: 0.42, blue: 0.96),
-                iconTint: .primary
-            )
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(store.visibleEntries) { entry in
+                        ProviderCard(entry: entry)
+                    }
+                    if store.visibleEntries.isEmpty {
+                        Text("All meters are hidden. Show them from Providers below.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding()
+                    }
+                }
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
+                    }
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            // MenuBarExtra proposes a compact size. A maximum alone lets the
+            // scroll view collapse, leaving only the header and Providers button,
+            // so the measured content height is applied as an explicit height.
+            .frame(height: listHeight)
+            .onPreferenceChange(ContentHeightKey.self) { height in
+                contentHeight = height
+            }
 
             footer
         }
         .padding(14)
         .frame(width: 348)
+    }
+
+    /// Shrink to the cards actually present, and scroll beyond the cap.
+    private var listHeight: CGFloat {
+        guard !store.visibleEntries.isEmpty else { return 100 }
+        guard contentHeight > 0 else { return Self.maximumListHeight }
+        return min(contentHeight, Self.maximumListHeight)
     }
 
     private var header: some View {
@@ -174,6 +195,9 @@ struct UsagePopover: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
+            Button("Providers…") { AccountWindow.show(store: store) }
+                .buttonStyle(.plain)
+                .font(.caption)
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -184,44 +208,83 @@ struct UsagePopover: View {
     }
 }
 
-private struct ProviderCard: View {
-    let provider: UsageProvider
-    let usage: ProviderUsage?
-    let error: String?
-    let tint: Color
-    var iconTint: Color? = nil
+private struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+extension UsageProvider {
+    var tint: Color {
+        switch self {
+        case .codex: Color(red: 0.20, green: 0.48, blue: 0.98)
+        case .claude: Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
+        case .cursor: Color(red: 0.48, green: 0.42, blue: 0.96)
+        }
+    }
+
+    var iconTint: Color { self == .claude ? tint : .primary }
+}
+
+struct ProviderCard<Controls: View>: View {
+    let entry: UsageEntry
+    var visibility: Binding<Bool>?
+    var showsAccountName = true
+    @ViewBuilder let controls: Controls
+
+    private var provider: UsageProvider { entry.provider }
+    private var usage: ProviderUsage? { entry.usage }
+    private var error: String? { entry.error }
+    private var tint: Color { provider.tint }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 8) {
-                ProviderIcon(provider: provider, size: 28, tint: iconTint ?? tint)
+                ProviderIcon(provider: provider, size: 28, tint: provider.iconTint)
 
-                Text(provider.displayName)
-                    .font(.system(size: 14, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(provider.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                        if let usage {
+                            StatusDot(usage: usage)
+                        }
+                    }
+                    if showsAccountName, let accountName = entry.account?.name {
+                        Text(accountName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(accountName)
+                    }
+                }
                 Spacer()
-                if usage?.isStale == true {
-                    Text("STALE")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
+                if let visibility {
+                    Toggle("Show", isOn: visibility)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .accessibilityLabel("Show \(entry.displayName)")
+                        .help("Show in the menu bar and usage popover")
                 }
             }
+
+            controls
 
             if let usage {
                 ForEach(usage.limits) { limit in
                     LimitRow(limit: limit, tint: tint)
                 }
 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(usage.isStale ? Color.orange : Color.green)
-                        .frame(width: 5, height: 5)
-                    Text(usage.sourceDescription)
-                    if usage.limits.contains(where: \.resetIsEstimated) {
-                        Text("· reset ≈ estimated")
+                if provider == .codex {
+                    if usage.limits.isEmpty {
+                        Text("Usage windows unavailable")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                    BankedResetsView(resets: usage.bankedResets)
                 }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
             } else {
                 Text(error ?? "Loading…")
                     .font(.caption)
@@ -229,6 +292,7 @@ private struct ProviderCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
@@ -238,6 +302,14 @@ private struct ProviderCard: View {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .stroke(Color.primary.opacity(0.07), lineWidth: 1)
         }
+    }
+}
+
+extension ProviderCard where Controls == EmptyView {
+    init(entry: UsageEntry) {
+        self.entry = entry
+        self.visibility = nil
+        self.controls = EmptyView()
     }
 }
 
@@ -290,10 +362,13 @@ private struct LimitRow: View {
     private func resetText(now: Date) -> String {
         guard let reset = limit.resetsAt else { return "Reset unavailable" }
         let prefix = limit.resetIsEstimated ? "Resets ≈ " : "Resets in "
-        return prefix + Self.duration(max(0, reset.timeIntervalSince(now)))
+        return prefix + UsageCountdown.duration(max(0, reset.timeIntervalSince(now)))
     }
 
-    private static func duration(_ interval: TimeInterval) -> String {
+}
+
+enum UsageCountdown {
+    static func duration(_ interval: TimeInterval) -> String {
         let minutes = Int(interval / 60)
         if minutes < 60 { return "\(max(1, minutes))m" }
         let hours = minutes / 60
@@ -304,6 +379,27 @@ private struct LimitRow: View {
         let days = hours / 24
         let remainingHours = hours % 24
         return remainingHours == 0 ? "\(days)d" : "\(days)d \(remainingHours)h"
+    }
+}
+
+/// Replaces the former status line: hover or VoiceOver still reports the
+/// source, staleness, and whether a reset time is estimated.
+private struct StatusDot: View {
+    let usage: ProviderUsage
+
+    var body: some View {
+        Circle()
+            .fill(usage.isStale ? Color.orange : Color.green)
+            .frame(width: 6, height: 6)
+            .help(description)
+            .accessibilityLabel(description)
+    }
+
+    private var description: String {
+        var parts = [usage.sourceDescription]
+        if usage.isStale { parts.append("stale") }
+        if usage.limits.contains(where: \.resetIsEstimated) { parts.append("reset ≈ estimated") }
+        return parts.joined(separator: " · ")
     }
 }
 

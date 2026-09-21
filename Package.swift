@@ -18,5 +18,9 @@ let package = Package(
             name: "UsageMeterCoreTests",
             dependencies: ["UsageMeterCore"]
         ),
+        .testTarget(
+            name: "ResetMeterAppTests",
+            dependencies: ["ResetMeterApp", "UsageMeterCore"]
+        ),
     ]
 )

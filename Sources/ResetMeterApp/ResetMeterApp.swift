@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UsageMeterCore
 
 @main
 struct ResetMeterApp: App {
@@ -15,12 +16,12 @@ struct ResetMeterApp: App {
         if let outputPath {
             Task { @MainActor in
                 if demoSnapshotPath != nil {
-                    usageStore.loadDemoData()
+                    usageStore.loadDemoData(multipleAccounts: CommandLine.arguments.contains("--demo-multiple-accounts"))
                 } else {
                     await usageStore.refresh()
                 }
                 do {
-                    try SnapshotWriter.write(store: usageStore, to: outputPath)
+                    try await SnapshotWriter.write(store: usageStore, to: outputPath)
                 } catch {
                     fputs("Snapshot failed: \(error.localizedDescription)\n", stderr)
                 }
@@ -57,11 +58,11 @@ struct ResetMeterApp: App {
 
 @MainActor
 private enum SnapshotWriter {
-    static func write(store: UsageStore, to path: String) throws {
+    static func write(store: UsageStore, to path: String) async throws {
         let popover = UsagePopover(store: store)
             .padding(18)
             .background(Color(nsColor: .windowBackgroundColor))
-        try writePNG(popover, to: URL(fileURLWithPath: path))
+        try await writePNG(popover, to: URL(fileURLWithPath: path))
 
         let outputURL = URL(fileURLWithPath: path)
         let menuURL = outputURL.deletingLastPathComponent()
@@ -89,19 +90,47 @@ private enum SnapshotWriter {
                     .frame(height: 0.5)
             }
             .environment(\.colorScheme, .dark)
-        try writePNG(menuLabel, to: menuURL)
+        try await writePNG(menuLabel, to: menuURL)
+        let accountsURL = outputURL.deletingLastPathComponent()
+            .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-accounts.png")
+        try await writePNG(AccountSettings(store: store)
+            .frame(width: 520, height: 720)
+            .background(Color(nsColor: .windowBackgroundColor)), to: accountsURL)
+        for provider in [UsageProvider.claude, .cursor] {
+            let providerURL = outputURL.deletingLastPathComponent()
+                .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-\(provider.rawValue).png")
+            try await writePNG(AccountSettings(store: store, selectedProvider: provider)
+                .frame(width: 520, height: 720)
+                .background(Color(nsColor: .windowBackgroundColor)), to: providerURL)
+        }
     }
 
-    private static func writePNG<Content: View>(_ content: Content, to url: URL) throws {
-        let renderer = ImageRenderer(content: content)
-        renderer.scale = 2
+    private static func writePNG<Content: View>(_ content: Content, to url: URL) async throws {
+        // Render through AppKit so native scroll views are included in snapshots.
+        let view = NSHostingView(rootView: content)
+        var size = view.fittingSize
+        view.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: view.frame, styleMask: .borderless,
+                              backing: .buffered, defer: false)
+        window.contentView = view
 
-        guard
-            let image = renderer.nsImage,
-            let tiff = image.tiffRepresentation,
-            let bitmap = NSBitmapImageRep(data: tiff),
-            let png = bitmap.representation(using: .png, properties: [:])
-        else {
+        // The popover measures its own cards, so its first proposal can exceed
+        // the settled height. Re-layout until the size stops changing, or the
+        // capture keeps the taller frame and pads the image with blank space.
+        for _ in 0..<5 {
+            view.frame = NSRect(origin: .zero, size: size)
+            window.setContentSize(size)
+            view.layoutSubtreeIfNeeded()
+            try? await Task.sleep(for: .milliseconds(60))
+            let settled = view.fittingSize
+            if settled == size { break }
+            size = settled
+        }
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else {
             throw CocoaError(.fileWriteUnknown)
         }
 

@@ -1,52 +1,34 @@
 import Foundation
 
 public enum CodexUsageReader {
-    public static func fetch() async throws -> ProviderUsage {
-        try await Task.detached(priority: .utility) {
-            try self.fetchSynchronously()
-        }.value
+    public static func fetch(account: CodexAccount = .defaultAccount) async throws -> ProviderUsage {
+        let output = try await execute(account: account, login: false)
+        return try parse(output: output, now: Date())
     }
 
-    static func fetchSynchronously() throws -> ProviderUsage {
-        guard let executable = findCodexExecutable() else {
-            throw UsageReadError.codexNotFound
+    public static func signIn(account: CodexAccount) async throws {
+        // Never change the login used by the user's regular Codex installation.
+        guard let home = account.homeDirectory else { throw UsageReadError.codexLoginFailed }
+        try FileManager.default.createDirectory(
+            at: home, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        _ = try await execute(account: account, login: true)
+    }
+
+    private static func execute(account: CodexAccount, login: Bool) async throws -> Data {
+        guard let executable = findCodexExecutable() else { throw UsageReadError.codexNotFound }
+        let cancellation = CodexCancellation()
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                try CodexCommand.run(
+                    executable: executable, account: account, login: login,
+                    timeout: login ? 180 : 20, cancellation: cancellation
+                )
+            }.value
+        } onCancel: {
+            cancellation.cancel()
         }
-
-        let process = Process()
-        let standardInput = Pipe()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-
-        process.executableURL = executable
-        process.arguments = ["app-server", "--stdio"]
-        process.standardInput = standardInput
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-
-        var environment = ProcessInfo.processInfo.environment
-        let executableDirectory = executable.deletingLastPathComponent().path
-        environment["PATH"] = executableDirectory + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
-        process.environment = environment
-
-        try process.run()
-
-        let initialize = #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"reset-meter","version":"\#(clientVersion)"},"capabilities":{"experimentalApi":true}}}"#
-        let request = #"{"id":2,"method":"account/rateLimits/read"}"#
-        let payload = Data((initialize + "\n" + request + "\n").utf8)
-        try standardInput.fileHandleForWriting.write(contentsOf: payload)
-
-        // The app server stays alive while stdin is open. Give the read-only
-        // account request a short window to finish, then close it cleanly.
-        Thread.sleep(forTimeInterval: 2.5)
-        try? standardInput.fileHandleForWriting.close()
-
-        let output = try standardOutput.fileHandleForReading.readToEnd() ?? Data()
-        process.waitUntilExit()
-
-        guard !output.isEmpty else {
-            throw UsageReadError.codexTimedOut
-        }
-        return try parse(output: output, now: Date())
     }
 
     public static func parse(output: Data, now: Date) throws -> ProviderUsage {
@@ -58,9 +40,10 @@ public enum CodexUsageReader {
             guard
                 let data = String(line).data(using: .utf8),
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                (object["id"] as? NSNumber)?.intValue == 2,
-                let result = object["result"] as? [String: Any]
+                (object["id"] as? NSNumber)?.intValue == 2
             else { continue }
+            if object["error"] != nil { throw UsageReadError.codexAccountUnavailable }
+            guard let result = object["result"] as? [String: Any] else { continue }
 
             let rateLimits: [String: Any]?
             if
@@ -72,17 +55,18 @@ public enum CodexUsageReader {
                 rateLimits = result["rateLimits"] as? [String: Any]
             }
 
-            guard let rateLimits else { continue }
+            let bankedResets = BankedResets.parse(result["rateLimitResetCredits"])
             let limits = ["primary", "secondary"].compactMap { key in
-                parseWindow(rateLimits[key], key: key)
+                parseWindow(rateLimits?[key], key: key)
             }
 
-            guard !limits.isEmpty else { continue }
+            guard !limits.isEmpty || bankedResets != nil else { continue }
             return ProviderUsage(
                 provider: .codex,
                 limits: limits,
                 updatedAt: now,
-                sourceDescription: "Live Codex status"
+                sourceDescription: "Live Codex status",
+                bankedResets: bankedResets
             )
         }
 
@@ -128,6 +112,7 @@ public enum CodexUsageReader {
             URL(fileURLWithPath: "/usr/local/bin/codex"),
             home.appending(path: ".local/bin/codex"),
             home.appending(path: ".bun/bin/codex"),
+            URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex"),
         ]
 
         let nvmRoot = home.appending(path: ".nvm/versions/node")
@@ -144,7 +129,7 @@ public enum CodexUsageReader {
         return candidates.first { fileManager.isExecutableFile(atPath: $0.path) }
     }
 
-    private static var clientVersion: String {
+    static var clientVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
             ?? "development"
     }

@@ -67,19 +67,22 @@ public struct ProviderUsage: Equatable, Sendable {
     public let updatedAt: Date
     public let sourceDescription: String
     public let isStale: Bool
+    public let bankedResets: BankedResets?
 
     public init(
         provider: UsageProvider,
         limits: [UsageLimit],
         updatedAt: Date,
         sourceDescription: String,
-        isStale: Bool = false
+        isStale: Bool = false,
+        bankedResets: BankedResets? = nil
     ) {
         self.provider = provider
         self.limits = limits
         self.updatedAt = updatedAt
         self.sourceDescription = sourceDescription
         self.isStale = isStale
+        self.bankedResets = bankedResets
     }
 
     public var headlinePercent: Int? {
@@ -92,6 +95,8 @@ public enum UsageReadError: LocalizedError, Sendable {
     case codexNotFound
     case codexTimedOut
     case malformedCodexResponse
+    case codexAccountUnavailable
+    case codexLoginFailed
     case claudeHistoryMissing
     case claudeHistoryEmpty
     case cursorNotFound
@@ -107,6 +112,10 @@ public enum UsageReadError: LocalizedError, Sendable {
             "Codex did not return usage in time."
         case .malformedCodexResponse:
             "Codex returned an unfamiliar usage response."
+        case .codexAccountUnavailable:
+            "Usage is unavailable for this account. Check its ChatGPT subscription or sign in again."
+        case .codexLoginFailed:
+            "Sign-in did not finish. Try again and complete the browser sign-in within three minutes."
         case .claudeHistoryMissing:
             "Claude Desktop's local usage cache was not found."
         case .claudeHistoryEmpty:
