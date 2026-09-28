@@ -68,6 +68,7 @@ public struct ProviderUsage: Equatable, Sendable {
     public let sourceDescription: String
     public let isStale: Bool
     public let bankedResets: BankedResets?
+    public let planName: String?
 
     public init(
         provider: UsageProvider,
@@ -75,7 +76,8 @@ public struct ProviderUsage: Equatable, Sendable {
         updatedAt: Date,
         sourceDescription: String,
         isStale: Bool = false,
-        bankedResets: BankedResets? = nil
+        bankedResets: BankedResets? = nil,
+        planName: String? = nil
     ) {
         self.provider = provider
         self.limits = limits
@@ -83,6 +85,7 @@ public struct ProviderUsage: Equatable, Sendable {
         self.sourceDescription = sourceDescription
         self.isStale = isStale
         self.bankedResets = bankedResets
+        self.planName = planName
     }
 
     public var headlinePercent: Int? {
@@ -97,11 +100,20 @@ public enum UsageReadError: LocalizedError, Sendable {
     case malformedCodexResponse
     case codexAccountUnavailable
     case codexLoginFailed
-    case claudeHistoryMissing
-    case claudeHistoryEmpty
+    case claudeNotFound
+    case claudeLocalUnavailable
+    case claudeSignedOut
+    case claudeAuthorizationFailed
+    case claudeLoginFailed
+    case claudeTimedOut
+    case claudeCredentialsUnavailable
+    case claudeRateLimited
+    case malformedClaudeResponse
     case cursorNotFound
     case cursorSignedOut
     case cursorAuthorizationFailed
+    case cursorLoginFailed
+    case cursorCredentialsUnavailable
     case malformedCursorResponse
 
     public var errorDescription: String? {
@@ -116,16 +128,34 @@ public enum UsageReadError: LocalizedError, Sendable {
             "Usage is unavailable for this account. Check its ChatGPT subscription or sign in again."
         case .codexLoginFailed:
             "Sign-in did not finish. Try again and complete the browser sign-in within three minutes."
-        case .claudeHistoryMissing:
-            "Claude Desktop's local usage cache was not found."
-        case .claudeHistoryEmpty:
-            "Claude Desktop has not cached usage yet. Open Claude's usage menu once."
+        case .claudeNotFound:
+            "Claude's sign-in helper was not found. Open the Claude app's Code tab once so it finishes setup, then click Sign In again."
+        case .claudeLocalUnavailable:
+            "No current Claude reading on this Mac. Open the Claude app and view your usage, then refresh. Or choose Login for live account usage with reset times."
+        case .claudeSignedOut:
+            "This Claude account is not signed in. Click Sign In in Providers to connect it."
+        case .claudeAuthorizationFailed:
+            "This Claude login has expired or was signed out elsewhere. Click Sign In in Providers to reconnect it."
+        case .claudeLoginFailed:
+            "Claude sign-in did not finish. Try again and complete the browser sign-in within three minutes."
+        case .claudeTimedOut:
+            "Claude took too long to renew this login. Refresh to try again."
+        case .claudeCredentialsUnavailable:
+            "Could not read this Claude login from Keychain. Make sure your login keychain is unlocked, then refresh."
+        case .claudeRateLimited:
+            "Claude is limiting usage checks. Wait a few minutes, then refresh."
+        case .malformedClaudeResponse:
+            "Claude returned an unfamiliar usage response."
         case .cursorNotFound:
             "Cursor's local state was not found. Install and open Cursor once."
         case .cursorSignedOut:
-            "Cursor is not signed in. Sign in to Cursor, then refresh."
+            "No Cursor login found for this connection. Choose Login and Sign In, or sign in to Cursor for Local mode."
         case .cursorAuthorizationFailed:
-            "Cursor's login needs refreshing. Open Cursor, then refresh."
+            "Cursor's login needs refreshing. Sign In again in Login mode, or open Cursor in Local mode, then refresh."
+        case .cursorLoginFailed:
+            "Cursor sign-in did not finish. Try again and complete the browser sign-in within three minutes."
+        case .cursorCredentialsUnavailable:
+            "Could not access this Cursor login. Allow Keychain access, then try again."
         case .malformedCursorResponse:
             "Cursor returned an unfamiliar usage response."
         }

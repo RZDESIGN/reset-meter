@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-final class CodexCancellation: @unchecked Sendable {
+final class CommandCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     func cancel() { lock.withLock { cancelled = true } }
@@ -27,17 +27,18 @@ enum CodexCommand {
 
     static func run(
         executable: URL, account: CodexAccount, login: Bool,
-        timeout: TimeInterval, cancellation: CodexCancellation = CodexCancellation()
+        timeout: TimeInterval, cancellation: CommandCancellation = CommandCancellation()
     ) throws -> Data {
-        if !account.isDefault && account.homeDirectory == nil {
+        if !account.isValid || (login && account.mode != .login) {
             throw UsageReadError.codexLoginFailed
         }
+        if cancellation.isCancelled { throw CancellationError() }
         let process = Process()
         let input = Pipe()
         let output = Pipe()
         process.executableURL = executable
         process.arguments = login ? ["login"] : ["app-server", "--stdio"]
-        if !account.isDefault {
+        if account.mode == .login {
             process.arguments! += ["-c", "cli_auth_credentials_store=\"file\""]
         }
         process.environment = environment(account: account, executable: executable)
@@ -74,10 +75,17 @@ enum CodexCommand {
         var data = Data()
         var pending = Data()
         var requested = false
+        var received = Set<Int>()
+        var usageReceivedAt: TimeInterval?
         var buffer = [UInt8](repeating: 0, count: 8192)
         while true {
             if cancellation.isCancelled { throw CancellationError() }
+            // Plan metadata is optional; older CLI versions must still return usage.
+            if let usageReceivedAt, ProcessInfo.processInfo.systemUptime - usageReceivedAt >= 1 {
+                return data
+            }
             if ProcessInfo.processInfo.systemUptime >= deadline {
+                if received.contains(2) { return data }
                 throw login ? UsageReadError.codexLoginFailed : UsageReadError.codexTimedOut
             }
             let count = read(descriptor, &buffer, buffer.count)
@@ -95,9 +103,12 @@ enum CodexCommand {
                             guard object["error"] == nil else { throw UsageReadError.malformedCodexResponse }
                             try send(#"{"method":"initialized"}"#)
                             try send(#"{"id":2,"method":"account/rateLimits/read"}"#)
+                            try send(#"{"id":3,"method":"account/read","params":{"refreshToken":false}}"#)
                             requested = true
                         }
-                        if id == 2 { return data }
+                        received.insert(id)
+                        if id == 2 { usageReceivedAt = ProcessInfo.processInfo.systemUptime }
+                        if received.contains(2) && received.contains(3) { return data }
                     }
                 }
                 continue

@@ -18,7 +18,7 @@ public enum CodexUsageReader {
 
     private static func execute(account: CodexAccount, login: Bool) async throws -> Data {
         guard let executable = findCodexExecutable() else { throw UsageReadError.codexNotFound }
-        let cancellation = CodexCancellation()
+        let cancellation = CommandCancellation()
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
                 try CodexCommand.run(
@@ -36,10 +36,18 @@ public enum CodexUsageReader {
             throw UsageReadError.malformedCodexResponse
         }
 
-        for line in text.split(whereSeparator: \Character.isNewline).reversed() {
+        let messages = text.split(whereSeparator: \Character.isNewline).compactMap { line in
+            try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        }
+        let accountPlan = messages.reversed().compactMap { object -> String? in
+            guard (object["id"] as? NSNumber)?.intValue == 3,
+                  let result = object["result"] as? [String: Any],
+                  let account = result["account"] as? [String: Any] else { return nil }
+            return AccountPlan.codex(account["planType"] as? String)
+        }.first
+
+        for object in messages.reversed() {
             guard
-                let data = String(line).data(using: .utf8),
-                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                 (object["id"] as? NSNumber)?.intValue == 2
             else { continue }
             if object["error"] != nil { throw UsageReadError.codexAccountUnavailable }
@@ -66,7 +74,8 @@ public enum CodexUsageReader {
                 limits: limits,
                 updatedAt: now,
                 sourceDescription: "Live Codex status",
-                bankedResets: bankedResets
+                bankedResets: bankedResets,
+                planName: accountPlan ?? AccountPlan.codex(rateLimits?["planType"] as? String)
             )
         }
 
@@ -113,7 +122,13 @@ public enum CodexUsageReader {
             home.appending(path: ".local/bin/codex"),
             home.appending(path: ".bun/bin/codex"),
             URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex"),
+            URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
+            home.appending(path: "Applications/Codex.app/Contents/Resources/codex"),
+            home.appending(path: "Applications/ChatGPT.app/Contents/Resources/codex"),
         ]
+        candidates += (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").filter { $0.hasPrefix("/") }
+            .map { URL(fileURLWithPath: String($0)).appending(path: "codex") }
 
         let nvmRoot = home.appending(path: ".nvm/versions/node")
         if let versions = try? fileManager.contentsOfDirectory(

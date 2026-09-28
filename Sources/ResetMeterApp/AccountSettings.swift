@@ -27,6 +27,8 @@ enum AccountWindow {
 struct AccountSettings: View {
     @ObservedObject var store: UsageStore
     @State private var newName = ""
+    @State private var newAccountProvider: UsageProvider = .codex
+    @State private var newMode: ConnectionMode = .login
     @State var selectedProvider: UsageProvider? = nil
 
     var body: some View {
@@ -68,29 +70,47 @@ struct AccountSettings: View {
                             ),
                             showsAccountName: false
                         ) {
-                            if let account = entry.account {
-                                AccountControls(store: store, account: account)
-                            }
+                            AccountControls(store: store, entry: entry)
                         }
                     }
                 }
                 .padding(2)
             }
             .scrollBounceBehavior(.basedOnSize)
-            if selectedProvider == nil || selectedProvider == .codex {
-                Divider()
-                Text("Add Codex account").font(.headline)
-                HStack {
-                    TextField("Account name, e.g. Work", text: $newName)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { addAccount() }
-                    Button("Add & Sign In") { addAccount() }
-                        .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+            Divider()
+            Text("Add \(addingProvider.displayName) account").font(.headline)
+            HStack {
+                if selectedProvider == nil {
+                    Picker("Account provider", selection: $newAccountProvider) {
+                        Text("Codex").tag(UsageProvider.codex)
+                        Text("Claude").tag(UsageProvider.claude)
+                        Text("Cursor").tag(UsageProvider.cursor)
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+                    .disabled(busy)
                 }
-                Text("Sign in with the other subscription in your browser. Each added account keeps its own local Codex login.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Picker("Connection", selection: $newMode) {
+                    ForEach(ConnectionMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
             }
+            HStack {
+                TextField("Account name, e.g. Work", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addAccount() }
+                Button(newMode == .login ? "Add & Sign In" : "Add Local") { addAccount() }
+                    .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+            }
+            Text(newMode == .login
+                 ? "Sign in in your browser. Each Login connection stays separate from your installed app and other accounts."
+                 : "Uses the account already signed in on this Mac. Local connections to the same provider share that account.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if store.signingInAccountID != nil {
                 HStack {
                     ProgressView().controlSize(.small)
@@ -110,46 +130,90 @@ struct AccountSettings: View {
     }
 
     private var busy: Bool { store.isRefreshing || store.signingInAccountID != nil }
+    private var addingProvider: UsageProvider { selectedProvider ?? newAccountProvider }
 
     private func addAccount() {
         guard !busy, !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        store.addAccount(name: newName)
+        store.addAccount(name: newName, provider: addingProvider, mode: newMode)
         newName = ""
     }
 }
 
 private struct AccountControls: View {
     @ObservedObject var store: UsageStore
-    let account: CodexAccount
+    let entry: UsageEntry
     @State private var name: String
 
-    init(store: UsageStore, account: CodexAccount) {
+    init(store: UsageStore, entry: UsageEntry) {
         self.store = store
-        self.account = account
-        _name = State(initialValue: account.name)
+        self.entry = entry
+        _name = State(initialValue: entry.accountName ?? "Default")
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Picker("Connection", selection: Binding(
+                get: { entry.mode },
+                set: { mode in
+                    store.setMode(mode, entryID: entry.id)
+                    Task { await store.refresh() }
+                }
+            )) {
+                ForEach(ConnectionMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(busy)
+            .accessibilityLabel("\(entry.provider.displayName) \(name) connection mode")
             HStack {
                 TextField("Account name", text: $name)
                     .textFieldStyle(.roundedBorder)
-                    .onChange(of: name) { _, value in store.renameAccount(account, name: value) }
-                if !account.isDefault {
-                    Button("Sign In") { store.signIn(account) }
-                        .disabled(busy)
-                    Button(role: .destructive) { store.removeAccount(account) } label: {
-                        Image(systemName: "trash")
+                    .onChange(of: name) { _, value in
+                        if let account = entry.account { store.renameAccount(account, name: value) }
+                        if let account = entry.claudeAccount { store.renameAccount(account, name: value) }
+                        if let account = entry.cursorAccount { store.renameAccount(account, name: value) }
+                    }
+                if entry.mode == .login {
+                    Button("Sign In") {
+                        if let account = entry.account { store.signIn(account) }
+                        if let account = entry.claudeAccount { store.signIn(account) }
+                        if let account = entry.cursorAccount { store.signIn(account) }
                     }
                     .disabled(busy)
-                    .help("Remove this account and its local Reset Meter login")
+                }
+                if !isDefault {
+                    Button(role: .destructive) {
+                        if let account = entry.account { store.removeAccount(account) }
+                        if let account = entry.claudeAccount { store.removeAccount(account) }
+                        if let account = entry.cursorAccount { store.removeAccount(account) }
+                    } label: { Image(systemName: "trash") }
+                    .disabled(busy)
+                    .help("Remove this account and its saved Reset Meter login")
+                    .accessibilityLabel("Remove \(entry.provider.displayName) \(name)")
                 }
             }
-            if account.isDefault {
-                Text("Uses your current Codex CLI login.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(connectionDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var isDefault: Bool {
+        entry.account?.isDefault ?? entry.claudeAccount?.isDefault ?? entry.cursorAccount?.isDefault ?? true
+    }
+
+    private var connectionDescription: String {
+        if entry.mode == .login {
+            return entry.provider == .claude
+                ? "Separate browser login for live account usage and reset times. Uses the sign-in helper built into the Claude app."
+                : "Separate browser login saved for this Reset Meter account."
+        }
+        switch entry.provider {
+        case .codex: return "Uses the current Codex app or CLI login on this Mac."
+        case .claude: return "Reads the Claude app’s usage cache, which has no reset times, or a current Claude Code login. Never changes either."
+        case .cursor: return "Uses the current Cursor app login on this Mac."
         }
     }
 

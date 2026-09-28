@@ -28,47 +28,55 @@ Reset Meter supports macOS 14 or later on Apple Silicon and Intel Macs.
 
 The current community build is not Apple-notarized. On first launch, Control-click the app, choose **Open**, then confirm. A Developer ID-signed and notarized build can replace it without changing the app or installer scripts.
 
-## Provider support
+## Connections: Local or Login
 
-| Provider | What Reset Meter reads | Requirement |
+Open **Providers…** and choose **Local** or **Login** on any Codex, Claude, or Cursor account card. The choice is saved per connection, including the default connections.
+
+| Provider | Local | Login |
 | --- | --- | --- |
-| Codex | The CLI's read-only `account/rateLimits/read` response | Codex CLI installed and signed in |
-| Claude | Claude Desktop's local `plan-usage-history.json` cache | Claude Desktop installed and used at least once |
-| Cursor | Cursor's local sign-in token, used for its current-period usage request | Cursor installed and signed in |
+| Codex | Uses the current Codex app or CLI login | Browser sign-in with an isolated Codex profile |
+| Claude | Reads the Claude app’s usage cache, or live usage from a current standalone Claude Code login. Never renews or changes either | Browser sign-in with an isolated Claude profile for live account usage, reset times, and plan. Uses the sign-in helper bundled with the Claude app, or a standalone Claude Code installation |
+| Cursor | Reads the current Cursor app login | Browser sign-in saved separately in Reset Meter’s macOS Keychain entry |
 
-Claude's local cache does not include reset timestamps. Reset Meter estimates the active rolling-window reset from the usage history and marks it with `≈`. Codex and Cursor currently expose live reset timestamps.
+If you use Code inside the Claude app, you do not need a separate Claude Code installation. The Claude app includes the sign-in helper that Login uses once its Code tab has finished setup; Reset Meter detects the newest one automatically. If the app has not downloaded it yet, open its Code tab once, or install [Claude Code](https://code.claude.com/docs/en/overview). Claude usage is account-wide: the same 5-hour and weekly limits apply to chat, Cowork, and Code.
+
+Local means using the account on this Mac; Codex and Cursor still request live usage. Claude Local requests live usage only while a standalone Claude Code login is current, and otherwise shows the Claude app’s cache, which contains percentages only. Choose Login for live Claude account usage. Cached readings are marked with an orange dot and their source; reset times and plan details are unavailable rather than estimated. Login readings use live provider responses.
+
+Switching modes clears the displayed reading until the selected source refreshes. Saved Login credentials are retained when switching to Local, so switching back can reconnect without another browser sign-in. Local connections to the same provider follow the same installed-app account.
 
 These integrations use local or provider-internal interfaces rather than stable public usage APIs. A provider update can require a corresponding Reset Meter update.
 
-## Multiple Codex subscriptions
+## Multiple subscriptions
 
-Open the menu-bar popover and select **Providers…**. Your existing Codex CLI login appears as **Default**; rename it to something recognizable, such as **Personal**.
+In **Providers…**, select a provider, name the account (for example **Work**), choose **Login**, and click **Add & Sign In**. Complete the browser sign-in with the subscription you want to track. If the browser is already signed in to another account, switch accounts there. Codex, Claude, and Cursor each support separate Login connections with their own usage, visibility, and names.
 
-To connect another subscription, enter a name such as **Work**, click **Add & Sign In**, and complete the browser sign-in with that subscription's ChatGPT account. If the browser is already signed in to your first account, switch to the other account during sign-in. Each account gets its own menu-bar meter behind the single Codex logo, and its own named usage card, in the same order as the Providers panel. Percentages and reset windows stay separate.
+You can also choose Login on an existing default card and click **Sign In**. Each Login connection stays separate from the installed app’s login. Choose Local to follow the installed account instead. Names, modes, and visibility persist across restarts.
 
-Added accounts use isolated Codex login directories under `~/Library/Application Support/Reset Meter/Codex Accounts/`. They do not change the default CLI login. Names and account identifiers persist across app restarts. Use **Sign In** to reconnect an account; the trash button removes an added account and its local Reset Meter login. The default connection continues to follow your current CLI login.
+Added Codex and Claude logins use private directories under `~/Library/Application Support/Reset Meter/Codex Accounts/` and `Claude Accounts/`. Codex manages file-based credentials in its isolated `CODEX_HOME`. Claude’s sign-in helper manages directory-scoped Keychain credentials for its isolated `CLAUDE_CONFIG_DIR`, with its protected file fallback. Reset Meter reads these items with macOS’s `security` tool, the same way the helper does, so reading them never shows a Keychain prompt. Cursor Login credentials use a separate Keychain item for each Reset Meter account. Expiring Login credentials are renewed by the respective provider flow. Claude renewals run one at a time per account, even across copies of Reset Meter, and are never interrupted, because an interrupted renewal signs the account out.
 
-Codex manages file-based credentials inside each added account's private directory. Reset Meter stores no credentials in preferences and never logs them. This uses Codex's documented [`CODEX_HOME` and credential storage settings](https://learn.chatgpt.com/docs/auth).
+Use **Sign In** to reconnect. Removing an added account deletes its Reset Meter login, including any retained login from before a mode switch. It does not sign the installed app out. No credentials are stored in preferences or logged.
 
 ## Provider details and visibility
+
+Codex and Claude account cards show the provider-reported subscription plan, such as **Plus**, **Pro**, **Business**, or **Max 5×**, in both the popover and Providers. Codex supplies its plan through [`account/read`](https://learn.chatgpt.com/docs/app-server#authentication-modes); Claude supplies it through OAuth profile metadata, with saved login metadata as a fallback. If no plan is provided, the card shows **Plan unavailable**. Plans are never inferred from usage or manually assigned.
 
 Click the mini meters to see each Codex account's **Banked resets** line: the available count and when the next one expires. Click that line to expand the expiry date and countdown for every available reset. These come from the same read-only Codex status request as usage limits. If Codex provides only a count or a partial detail list, the expanded list marks the missing expiry details as unavailable; an unavailable count is never displayed as zero. Viewing the panel does not redeem resets.
 
 The dot beside each provider name shows whether its reading is live (green) or stale (orange). Hover it for the source of the reading.
 
-Open **Providers…** for the same usage bars, remaining percentages, and reset countdowns shown in the popover, for every Codex account, Claude, and Cursor. Use the **All**, **Codex**, **Claude**, and **Cursor** tabs to find a provider.
+Open **Providers…** for the same usage bars, remaining percentages, and reset countdowns shown in the popover, for every Codex, Claude, and Cursor account. Use the **All**, **Codex**, **Claude**, and **Cursor** tabs to find a provider.
 
-Each entry has a **Show** switch. Turning it off hides that entry from the menu bar and popover while keeping its connection and usage details available in Providers. This also works for the default Codex connection, so you can hide it when a separately added account tracks the same subscription. Visibility choices survive restarts. If all entries are hidden, a small Reset Meter icon remains so you can open Providers and turn them back on.
+Each entry has a **Show** switch. Turning it off hides that entry from the menu bar and popover while keeping its connection and usage details available in Providers. This also works for the default connections, so you can hide either when a separately added account tracks the same subscription. Visibility choices survive restarts. If all entries are hidden, a small Reset Meter icon remains so you can open Providers and turn them back on.
 
 ## Privacy
 
-- Usage requests go directly to the respective provider: Codex through its CLI, and Cursor through its usage endpoint. Account sign-in uses Codex's browser login.
-- Cursor's access token is read only when refreshing, held in memory, sent only to `api2.cursor.sh`, and never logged or saved by Reset Meter.
-- Codex is queried through the locally installed CLI process.
-- Additional Codex accounts have separate local login directories; removing one deletes that account's Reset Meter login directory.
-- Claude data is read from its local Desktop cache.
-- Reset Meter does not read prompts, conversations, browser cookies, or repository contents.
-- Reset Meter has no analytics, telemetry, crash reporter, or update tracker.
+- Usage requests go directly to the provider. Codex is queried through its local CLI process; Claude uses OAuth usage/profile endpoints; Cursor uses its usage endpoint.
+- Local mode reads only the selected provider’s existing credentials or the Claude app’s usage cache, and never renews or rewrites the installed Claude login. Reset Meter does not write Cursor’s local database or use browser cookies.
+- Codex and Claude browser sign-in and Login renewal use their own commands. The Claude app’s bundled command is supported.
+- Cursor Login uses Cursor’s browser authorization exchange with PKCE. Tokens are saved in macOS Keychain and sent only to `api2.cursor.sh` for usage or renewal. Cursor Local credentials are only held in memory.
+- Claude access tokens are sent only to `api.anthropic.com`; refresh tokens are passed privately to Claude Code. Claude and Cursor HTTP requests do not follow redirects or use cookies.
+- Removing an added connection deletes only that connection’s Reset Meter login. Switching modes preserves it.
+- Reset Meter does not read prompts, conversations, or repository contents, and has no analytics, telemetry, crash reporter, or update tracker.
 
 Do not attach real usage files, access tokens, or unredacted screenshots to public bug reports.
 

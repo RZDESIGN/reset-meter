@@ -29,6 +29,9 @@ import Testing
     case "$initialized" in *'"method":"initialized"'*) ;; *) exit 2;; esac
     IFS= read -r request
     case "$request" in *'"method":"account/rateLimits/read"'*) ;; *) exit 3;; esac
+    IFS= read -r account_request
+    case "$account_request" in *'"method":"account/read"'*) ;; *) exit 6;; esac
+    printf '%s\n' '{"id":3,"result":{"account":{"type":"chatgpt","planType":"pro"}}}'
     [ "$3" = '-c' ] || exit 4
     [ "$4" = 'cli_auth_credentials_store="file"' ] || exit 5
     printf '{"id":2,"result":{"home":"%s","rateLimits":{"primary":{"usedPercent":37}}}}\n' "$CODEX_HOME"
@@ -38,6 +41,7 @@ import Testing
     let output = try CodexCommand.run(executable: executable, account: account, login: false, timeout: 2)
     #expect(String(decoding: output, as: UTF8.self).contains(try #require(account.homeDirectory).path))
     #expect(try CodexUsageReader.parse(output: output, now: .now).headlinePercent == 63)
+    #expect(try CodexUsageReader.parse(output: output, now: .now).planName == "Pro")
 }
 
 @Test func codexCommandTimesOutAndCanBeCancelled() throws {
@@ -47,7 +51,7 @@ import Testing
     #expect(throws: UsageReadError.self) {
         try CodexCommand.run(executable: executable, account: .defaultAccount, login: false, timeout: 0.1)
     }
-    let cancellation = CodexCancellation()
+    let cancellation = CommandCancellation()
     cancellation.cancel()
     #expect(throws: CancellationError.self) {
         try CodexCommand.run(executable: executable, account: .defaultAccount, login: false, timeout: 30, cancellation: cancellation)
@@ -73,4 +77,21 @@ private func fakeCodex(_ script: String) throws -> URL {
     try Data(("#!/bin/sh\n" + script + "\n").utf8).write(to: executable)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
     return executable
+}
+
+@Test func codexMissingPlanReplyDoesNotBlockAvailableUsage() throws {
+    let executable = try fakeCodex(#"""
+    IFS= read -r initialize
+    printf '%s\n' '{"id":1,"result":{}}'
+    IFS= read -r initialized
+    IFS= read -r request
+    IFS= read -r account_request
+    printf '%s\n' '{"id":2,"result":{"rateLimits":{"planType":"plus","primary":{"usedPercent":25}}}}'
+    IFS= read -r done
+    """#)
+    defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+    let output = try CodexCommand.run(executable: executable, account: .defaultAccount, login: false, timeout: 3)
+    let usage = try CodexUsageReader.parse(output: output, now: .now)
+    #expect(usage.headlinePercent == 75)
+    #expect(usage.planName == "Plus")
 }

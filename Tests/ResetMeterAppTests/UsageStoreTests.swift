@@ -13,10 +13,10 @@ import UsageMeterCore
     let store = UsageStore(
         autoRefresh: false, preferences: preferences,
         codexFetcher: { try await fetcher.fetch($0) },
-        claudeFetcher: { throw UsageReadError.claudeHistoryMissing },
-        cursorFetcher: { throw UsageReadError.cursorNotFound }
+        claudeFetcher: { _ in throw UsageReadError.claudeSignedOut },
+        cursorFetcher: { _ in throw UsageReadError.cursorNotFound }
     )
-    store.renameAccount(.defaultAccount, name: "Personal")
+    store.renameAccount(CodexAccount.defaultAccount, name: "Personal")
     let restored = UsageStore(autoRefresh: false, preferences: preferences)
     #expect(restored.codexAccounts.map(\.name) == ["Personal", "Work"])
 
@@ -52,7 +52,7 @@ import UsageMeterCore
     defer { preferences.removePersistentDomain(forName: suite) }
     let store = UsageStore(autoRefresh: false, preferences: preferences)
     #expect(store.codexAccounts == [.defaultAccount])
-    store.removeAccount(.defaultAccount)
+    store.removeAccount(CodexAccount.defaultAccount)
     #expect(store.codexAccounts == [.defaultAccount])
     try preferences.set(JSONEncoder().encode([
         CodexAccount.defaultAccount, .defaultAccount, CodexAccount(id: "../invalid", name: "Invalid")
@@ -86,7 +86,7 @@ private actor TestFetcher {
     #expect(store.visibleEntries.count == 4)
 
     store.setVisible(false, entryID: "codex:default")
-    store.setVisible(false, entryID: "claude")
+    store.setVisible(false, entryID: "claude:default")
     #expect(store.visibleEntries.map(\.id) == ["codex:\(second.id)", "cursor"])
     #expect(store.menuEntries.map { $0.0 } == [.codex, .cursor])
     #expect(!store.menuSummary.contains("Claude"))
@@ -96,7 +96,7 @@ private actor TestFetcher {
     let restored = UsageStore(autoRefresh: false, preferences: preferences)
     #expect(restored.visibleEntries.map(\.id) == store.visibleEntries.map(\.id))
     restored.setVisible(true, entryID: "codex:default")
-    restored.setVisible(true, entryID: "claude")
+    restored.setVisible(true, entryID: "claude:default")
     #expect(restored.visibleEntries.map(\.id) == restored.entries.map(\.id))
     #expect(UsageStore(autoRefresh: false, preferences: preferences).hiddenEntryIDs.isEmpty)
 }
@@ -126,9 +126,9 @@ private actor TestFetcher {
     let store = UsageStore(autoRefresh: false, preferences: preferences)
     store.loadDemoData(multipleAccounts: true)
 
-    #expect(store.menuEntries.count == 4)
+    #expect(store.menuEntries.count == 5)
     #expect(store.menuGroups.map { $0.provider } == [.codex, .claude, .cursor])
-    #expect(store.menuGroups.map { $0.percents } == [[81, 37], [44], [86]])
+    #expect(store.menuGroups.map { $0.percents } == [[81, 37], [44, 82], [86]])
 
     store.setVisible(false, entryID: "codex:default")
     #expect(store.menuGroups.map { $0.provider } == [.codex, .claude, .cursor])

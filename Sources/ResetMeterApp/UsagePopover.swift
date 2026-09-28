@@ -252,12 +252,20 @@ struct ProviderCard<Controls: View>: View {
                             StatusDot(usage: usage)
                         }
                     }
-                    if showsAccountName, let accountName = entry.account?.name {
+                    if showsAccountName, let accountName = entry.accountName {
                         Text(accountName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .help(accountName)
+                    }
+                    if let plan = entry.planLabel {
+                        Text(plan)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help("Account plan: \(plan)")
+                            .accessibilityLabel("Account plan: \(plan)")
                     }
                 }
                 Spacer()
