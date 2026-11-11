@@ -38,6 +38,7 @@ public enum AccountPlan {
         guard let token = normalizedToken(value) else { return nil }
         switch token {
         case "free_trial": return "Trial"
+        case "pro_plus", "pro+": return "Pro+"
         default: return label(token)
         }
     }

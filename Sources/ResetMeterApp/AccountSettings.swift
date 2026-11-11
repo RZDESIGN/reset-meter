@@ -76,7 +76,9 @@ struct AccountSettings: View {
                                 get: { store.isVisible(entry.id) },
                                 set: { store.setVisible($0, entryID: entry.id) }
                             ),
-                            showsAccountSubtitle: false
+                            showsAccountSubtitle: false,
+                            onConnectCursor: { store.connectCursor(entry.account) },
+                            onCancelCursor: { store.cancelCursorConnect(entry.account) }
                         ) {
                             AccountControls(store: store, entry: entry)
                         }
@@ -243,6 +245,15 @@ private struct AccountControls: View {
                 }
                 .controlSize(.small)
                 .help("Open local profile folder in Finder")
+
+                if entry.hasSavedCursorSession {
+                    Button("Disconnect") {
+                        store.disconnectCursor(entry.account)
+                    }
+                    .controlSize(.small)
+                    .disabled(store.isRefreshing)
+                    .help("Remove the saved Cursor session from Reset Meter")
+                }
 
                 if !entry.account.isDefault {
                     Button(role: .destructive) {

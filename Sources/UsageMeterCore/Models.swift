@@ -122,7 +122,10 @@ public enum UsageReadError: LocalizedError, Equatable, Sendable {
     case malformedAntigravityResponse
     case cursorNotFound
     case cursorSignedOut
+    case cursorEncryptedLocalSession
     case cursorAuthorizationFailed
+    case cursorCredentialsUnavailable
+    case cursorLoginFailed
     case malformedCursorResponse
 
     public var errorDescription: String? {
@@ -152,9 +155,15 @@ public enum UsageReadError: LocalizedError, Equatable, Sendable {
         case .cursorNotFound:
             "Cursor's local database was not found. Install and open Cursor once."
         case .cursorSignedOut:
-            "No active login in this local Cursor profile."
+            "Cursor is not connected yet. Click Connect Cursor or run cursor-agent login."
+        case .cursorEncryptedLocalSession:
+            "Cursor 3.29+ encrypts its desktop token. Connect once (or run cursor-agent login)."
         case .cursorAuthorizationFailed:
-            "Cursor's local token needs refreshing. Open Cursor once, then refresh."
+            "Cursor's session expired. Click Connect Cursor to reconnect."
+        case .cursorCredentialsUnavailable:
+            "Saved Cursor credentials could not be read from macOS Keychain."
+        case .cursorLoginFailed:
+            "Cursor browser sign-in did not complete."
         case .malformedCursorResponse:
             "Cursor returned an unfamiliar usage response."
         }

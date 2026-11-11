@@ -6,6 +6,9 @@ final class UsageStore: ObservableObject {
     @Published private(set) var accounts: [ProviderAccount]
     @Published private(set) var usageByID: [String: ProviderUsage] = [:]
     @Published private(set) var errorsByID: [String: String] = [:]
+    @Published private(set) var localPlansByID: [String: String] = [:]
+    @Published private(set) var connectingCursorIDs: Set<String> = []
+    @Published private(set) var savedCursorSessionIDs: Set<String> = []
     @Published private(set) var hiddenEntryIDs: Set<String>
     @Published var menuBarStyle: MenuBarStyle {
         didSet {
@@ -22,7 +25,9 @@ final class UsageStore: ObservableObject {
     private static let menuBarStyleKey = "menuBarStyle.v1"
 
     private var refreshTimer: Timer?
+    private var cursorConnectTasks: [String: Task<Void, Never>] = [:]
     private let fetcher: @Sendable (ProviderAccount) async throws -> ProviderUsage
+    private let cursorSignIn: @Sendable (ProviderAccount) async throws -> Void
     private let discoverer: @Sendable () -> [ProviderAccount]
     private let antigravityInstalled: @Sendable () -> Bool
     private let cursorInstalled: @Sendable () -> Bool
@@ -33,12 +38,14 @@ final class UsageStore: ObservableObject {
         discoverer: @escaping @Sendable () -> [ProviderAccount] = { LocalInstallationDiscovery.discoverAll() },
         antigravityInstalled: @escaping @Sendable () -> Bool = { LocalInstallationDiscovery.isAntigravityInstalled() },
         cursorInstalled: @escaping @Sendable () -> Bool = { LocalInstallationDiscovery.isCursorInstalled() },
+        cursorSignIn: @escaping @Sendable (ProviderAccount) async throws -> Void = { try await CursorLogin.signIn(account: $0) },
         fetcher: (@Sendable (ProviderAccount) async throws -> ProviderUsage)? = nil
     ) {
         self.preferences = preferences
         self.discoverer = discoverer
         self.antigravityInstalled = antigravityInstalled
         self.cursorInstalled = cursorInstalled
+        self.cursorSignIn = cursorSignIn
         self.fetcher = fetcher ?? Self.defaultFetch
 
         if let rawStyle = preferences.string(forKey: Self.menuBarStyleKey),
@@ -115,7 +122,11 @@ final class UsageStore: ObservableObject {
                         account: account,
                         usage: usageByID[account.id],
                         error: errorsByID[account.id],
-                        hasMultipleProviderAccounts: (counts[provider] ?? 0) > 1
+                        fallbackPlanName: localPlansByID[account.id],
+                        hasMultipleProviderAccounts: (counts[provider] ?? 0) > 1,
+                        isConnecting: connectingCursorIDs.contains(account.id),
+                        canConnectCursor: provider == .cursor && usageByID[account.id] == nil && errorsByID[account.id] != nil,
+                        hasSavedCursorSession: savedCursorSessionIDs.contains(account.id)
                     )
                 }
         }
@@ -206,12 +217,66 @@ final class UsageStore: ObservableObject {
     func removeAccount(_ account: ProviderAccount) {
         guard !account.isDefault, !isRefreshing,
               accounts.contains(where: { $0.id == account.id }) else { return }
+        cancelCursorConnect(account)
+        if account.provider == .cursor {
+            CursorLogin.disconnect(account: account)
+            savedCursorSessionIDs.remove(account.id)
+        }
         accounts.removeAll { $0.id == account.id }
         usageByID.removeValue(forKey: account.id)
         errorsByID.removeValue(forKey: account.id)
+        localPlansByID.removeValue(forKey: account.id)
         hiddenEntryIDs.remove(account.id)
         preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
         saveAccounts()
+    }
+
+    // MARK: - Cursor PKCE Connection (for Cursor 3.29+ encrypted storage)
+
+    func connectCursor(_ account: ProviderAccount) {
+        guard account.provider == .cursor,
+              !connectingCursorIDs.contains(account.id) else { return }
+        connectingCursorIDs.insert(account.id)
+        errorsByID[account.id] = nil
+
+        let signIn = self.cursorSignIn
+        cursorConnectTasks[account.id] = Task { [weak self] in
+            do {
+                try await signIn(account)
+                guard !Task.isCancelled else { return }
+                await self?.finishCursorConnect(account: account, error: nil)
+            } catch is CancellationError {
+                return
+            } catch {
+                await self?.finishCursorConnect(account: account, error: error.localizedDescription)
+            }
+        }
+    }
+
+    func cancelCursorConnect(_ account: ProviderAccount) {
+        cursorConnectTasks[account.id]?.cancel()
+        cursorConnectTasks.removeValue(forKey: account.id)
+        connectingCursorIDs.remove(account.id)
+    }
+
+    func disconnectCursor(_ account: ProviderAccount) {
+        guard account.provider == .cursor else { return }
+        cancelCursorConnect(account)
+        CursorLogin.disconnect(account: account)
+        savedCursorSessionIDs.remove(account.id)
+        usageByID.removeValue(forKey: account.id)
+        Task { await refresh() }
+    }
+
+    private func finishCursorConnect(account: ProviderAccount, error: String?) async {
+        cursorConnectTasks.removeValue(forKey: account.id)
+        connectingCursorIDs.remove(account.id)
+        if let error {
+            errorsByID[account.id] = error
+        } else {
+            savedCursorSessionIDs.insert(account.id)
+            await refresh()
+        }
     }
 
     // MARK: - Refresh
@@ -222,7 +287,14 @@ final class UsageStore: ObservableObject {
 
         let snapshot = accounts
         let fetcher = self.fetcher
+        async let cursorMetadata = Self.readCursorMetadata(for: snapshot)
         let results = await Self.fetchAll(snapshot, using: fetcher)
+        let (plans, savedSessions) = await cursorMetadata
+
+        for (id, plan) in plans {
+            localPlansByID[id] = plan
+        }
+        savedCursorSessionIDs = savedSessions
 
         for (id, usage, error) in results {
             guard accounts.contains(where: { $0.id == id }) else { continue }
@@ -232,6 +304,26 @@ final class UsageStore: ObservableObject {
 
         lastRefresh = Date()
         isRefreshing = false
+    }
+
+    private nonisolated static func readCursorMetadata(
+        for accounts: [ProviderAccount]
+    ) async -> ([String: String], Set<String>) {
+        let cursorAccounts = accounts.filter { $0.provider == .cursor }
+        guard !cursorAccounts.isEmpty else { return ([:], []) }
+        return await Task.detached(priority: .utility) {
+            var plans: [String: String] = [:]
+            var saved: Set<String> = []
+            for account in cursorAccounts {
+                if let plan = CursorUsageReader.readLocalPlan(account: account) {
+                    plans[account.id] = plan
+                }
+                if CursorCredentials.hasSavedSession(account: account) {
+                    saved.insert(account.id)
+                }
+            }
+            return (plans, saved)
+        }.value
     }
 
     private nonisolated static func fetchAll(

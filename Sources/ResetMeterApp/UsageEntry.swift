@@ -19,7 +19,11 @@ struct UsageEntry: Identifiable {
     let account: ProviderAccount
     let usage: ProviderUsage?
     let error: String?
+    var fallbackPlanName: String? = nil
     var hasMultipleProviderAccounts = false
+    var isConnecting = false
+    var canConnectCursor = false
+    var hasSavedCursorSession = false
 
     var id: String { account.id }
     var provider: UsageProvider { account.provider }
@@ -44,6 +48,6 @@ struct UsageEntry: Identifiable {
     }
 
     var planLabel: String? {
-        usage?.planName
+        usage?.planName ?? fallbackPlanName
     }
 }

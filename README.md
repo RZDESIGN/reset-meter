@@ -37,7 +37,7 @@ Reset Meter does **not** ask you to sign in through a separate browser flow, doe
 | **Codex** | Queries your installed `codex` CLI (`app-server`, including the CLI bundled inside `ChatGPT.app`) per `CODEX_HOME` directory for live rate limits, subscription plan, and banked resets. |
 | **Claude** | Uses a 3-layer read-only pipeline per profile: **(1)** active local Claude Desktop Code session matched to that profile's organization or config directory, **(2)** standalone Claude Code credentials in macOS Keychain or `.credentials.json` (read-only, never rotated), and **(3)** Claude Desktop's `plan-usage-history.json` + `.claude.json` plan metadata when offline or idle. |
 | **Antigravity** | Queries the running local Antigravity `language_server` over loopback (`127.0.0.1`) for live model quota pools (`Gemini`, `Claude & GPT`), subscription tier (for example **Google AI Ultra**), and available AI credits, with a local snapshot fallback while Antigravity is closed. |
-| **Cursor** | Reads `state.vscdb` in read-only mode (`sqlite3 -readonly`) per profile and requests first-party usage capacity and membership tier from Cursor. |
+| **Cursor** | Reads local `cursor-agent` CLI credentials (`~/.cursor/auth.json` / Keychain) or unencrypted `state.vscdb` automatically, and provides a one-click **Connect Cursor…** PKCE flow when Cursor 3.29+ encrypts its desktop token at rest (`cursor-safe-storage:v1:`). Supports Pro, Pro+, Ultra, Team, and Enterprise spend/pooled limits. |
 
 These integrations use local or provider-internal interfaces rather than stable public usage APIs. A provider update can require a corresponding Reset Meter update.
 

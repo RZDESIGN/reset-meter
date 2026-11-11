@@ -132,7 +132,7 @@ struct UsagePopover: View {
     @ObservedObject var store: UsageStore
     @State private var contentHeight: CGFloat = 0
 
-    private static let maximumListHeight: CGFloat = 650
+    private static let maximumListHeight: CGFloat = 760
 
     var body: some View {
         VStack(spacing: 11) {
@@ -141,7 +141,11 @@ struct UsagePopover: View {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(store.visibleEntries) { entry in
-                        ProviderCard(entry: entry)
+                        ProviderCard(
+                            entry: entry,
+                            onConnectCursor: { store.connectCursor(entry.account) },
+                            onCancelCursor: { store.cancelCursorConnect(entry.account) }
+                        )
                     }
                     if store.visibleEntries.isEmpty {
                         VStack(spacing: 8) {
@@ -282,6 +286,8 @@ struct ProviderCard<Controls: View>: View {
     let entry: UsageEntry
     var visibility: Binding<Bool>?
     var showsAccountSubtitle = true
+    var onConnectCursor: (() -> Void)? = nil
+    var onCancelCursor: (() -> Void)? = nil
     @ViewBuilder let controls: Controls
 
     private var provider: UsageProvider { entry.provider }
@@ -365,11 +371,32 @@ struct ProviderCard<Controls: View>: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 }
+            } else if entry.isConnecting {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Confirm sign-in in your browser…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    if let onCancelCursor {
+                        Button("Cancel", action: onCancelCursor)
+                            .controlSize(.small)
+                    }
+                }
             } else {
-                Text(error ?? "Loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .center, spacing: 8) {
+                    Text(error ?? "Loading…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if entry.canConnectCursor, let onConnectCursor {
+                        Spacer(minLength: 4)
+                        Button("Connect…", action: onConnectCursor)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -386,9 +413,15 @@ struct ProviderCard<Controls: View>: View {
 }
 
 extension ProviderCard where Controls == EmptyView {
-    init(entry: UsageEntry) {
+    init(
+        entry: UsageEntry,
+        onConnectCursor: (() -> Void)? = nil,
+        onCancelCursor: (() -> Void)? = nil
+    ) {
         self.entry = entry
         self.visibility = nil
+        self.onConnectCursor = onConnectCursor
+        self.onCancelCursor = onCancelCursor
         self.controls = EmptyView()
     }
 }
