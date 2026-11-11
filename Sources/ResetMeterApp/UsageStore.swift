@@ -382,89 +382,89 @@ final class UsageStore: ObservableObject {
         var demoAccounts = [codexDefault, claudeDefault, antigravityDefault, cursorDefault]
         var demoUsage: [String: ProviderUsage] = [:]
 
+        let codexWeekly = UsageLimit(
+            id: "codex-demo-weekly",
+            label: "Weekly",
+            usedPercent: 19,
+            resetsAt: now.addingTimeInterval(583_140),
+            durationMinutes: 10_080,
+            displayMode: .remaining
+        )
+        let codexResets = BankedResets(
+            availableCount: 2,
+            credits: [
+                BankedReset(id: "demo-reset-1", expiration: .date(now.addingTimeInterval(172_800))),
+                BankedReset(id: "demo-reset-2", expiration: .date(now.addingTimeInterval(1_209_600))),
+            ]
+        )
         demoUsage[codexDefault.id] = ProviderUsage(
             provider: .codex,
-            limits: [
-                UsageLimit(
-                    id: "codex-demo-weekly",
-                    label: "Weekly",
-                    usedPercent: 19,
-                    resetsAt: now.addingTimeInterval(TimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60)),
-                    durationMinutes: 10_080,
-                    displayMode: .remaining
-                )
-            ],
+            limits: [codexWeekly],
             updatedAt: now,
             sourceDescription: "Live local ChatGPT / Codex status",
-            bankedResets: BankedResets(availableCount: 2, credits: [
-                BankedReset(id: "demo-reset-1", expiration: .date(now.addingTimeInterval(TimeInterval(2 * 86_400)))),
-                BankedReset(id: "demo-reset-2", expiration: .date(now.addingTimeInterval(TimeInterval(14 * 86_400)))),
-            ]),
+            bankedResets: codexResets,
             planName: "Pro"
         )
 
+        let claudeFiveHour = UsageLimit(
+            id: "claude-demo-five-hour",
+            label: "5-hour",
+            usedPercent: 42,
+            resetsAt: now.addingTimeInterval(5_930),
+            durationMinutes: 300,
+            displayMode: .remaining
+        )
+        let claudeWeekly = UsageLimit(
+            id: "claude-demo-weekly",
+            label: "Weekly",
+            usedPercent: 56,
+            resetsAt: now.addingTimeInterval(496_740),
+            durationMinutes: 10_080,
+            displayMode: .remaining
+        )
         demoUsage[claudeDefault.id] = ProviderUsage(
             provider: .claude,
-            limits: [
-                UsageLimit(
-                    id: "claude-demo-five-hour",
-                    label: "5-hour",
-                    usedPercent: 42,
-                    resetsAt: now.addingTimeInterval(TimeInterval(1 * 3_600 + 38 * 60 + 50)),
-                    durationMinutes: 300,
-                    displayMode: .remaining
-                ),
-                UsageLimit(
-                    id: "claude-demo-weekly",
-                    label: "Weekly",
-                    usedPercent: 56,
-                    resetsAt: now.addingTimeInterval(TimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60)),
-                    durationMinutes: 10_080,
-                    displayMode: .remaining
-                ),
-            ],
+            limits: [claudeFiveHour, claudeWeekly],
             updatedAt: now,
             sourceDescription: "Live local Claude usage",
             planName: "Max 20×"
         )
 
+        let agGemini = UsageLimit(
+            id: "antigravity-demo-gemini",
+            label: "Gemini",
+            usedPercent: 12,
+            resetsAt: now.addingTimeInterval(13_680),
+            durationMinutes: 300,
+            displayMode: .remaining
+        )
+        let agClaude = UsageLimit(
+            id: "antigravity-demo-claude",
+            label: "Claude & GPT",
+            usedPercent: 24,
+            resetsAt: now.addingTimeInterval(15_120),
+            durationMinutes: 300,
+            displayMode: .remaining
+        )
         demoUsage[antigravityDefault.id] = ProviderUsage(
             provider: .antigravity,
-            limits: [
-                UsageLimit(
-                    id: "antigravity-demo-gemini",
-                    label: "Gemini",
-                    usedPercent: 12,
-                    resetsAt: now.addingTimeInterval(TimeInterval(3 * 3_600 + 48 * 60)),
-                    durationMinutes: 300,
-                    displayMode: .remaining
-                ),
-                UsageLimit(
-                    id: "antigravity-demo-claude",
-                    label: "Claude & GPT",
-                    usedPercent: 24,
-                    resetsAt: now.addingTimeInterval(TimeInterval(4 * 3_600 + 12 * 60)),
-                    durationMinutes: 300,
-                    displayMode: .remaining
-                ),
-            ],
+            limits: [agGemini, agClaude],
             updatedAt: now,
             sourceDescription: "Live local Antigravity status",
             planName: "Google AI Ultra",
             footnote: "2,400 AI credits available"
         )
 
+        let cursorIncluded = UsageLimit(
+            id: "cursor-demo-included",
+            label: "Composer + Grok",
+            usedPercent: 14,
+            resetsAt: now.addingTimeInterval(1_256_340),
+            displayMode: .remaining
+        )
         demoUsage[cursorDefault.id] = ProviderUsage(
             provider: .cursor,
-            limits: [
-                UsageLimit(
-                    id: "cursor-demo-included",
-                    label: "Composer + Grok",
-                    usedPercent: 14,
-                    resetsAt: now.addingTimeInterval(TimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60)),
-                    displayMode: .remaining
-                )
-            ],
+            limits: [cursorIncluded],
             updatedAt: now,
             sourceDescription: "Live local Cursor pool",
             planName: "Pro"
@@ -482,38 +482,38 @@ final class UsageStore: ObservableObject {
             demoAccounts.insert(codexWork, at: 1)
             demoAccounts.insert(claudeWork, at: 3)
 
+            let codexWorkWeekly = UsageLimit(
+                id: "codex-work-weekly",
+                label: "Weekly",
+                usedPercent: 29,
+                resetsAt: now.addingTimeInterval(172_800),
+                durationMinutes: 10_080,
+                displayMode: .remaining
+            )
+            let codexWorkResets = BankedResets(
+                availableCount: 1,
+                credits: [BankedReset(id: "demo-work-reset", expiration: .date(now.addingTimeInterval(604_800)))]
+            )
             demoUsage[codexWork.id] = ProviderUsage(
                 provider: .codex,
-                limits: [
-                    UsageLimit(
-                        id: "codex-work-weekly",
-                        label: "Weekly",
-                        usedPercent: 29,
-                        resetsAt: now.addingTimeInterval(TimeInterval(2 * 86_400)),
-                        durationMinutes: 10_080,
-                        displayMode: .remaining
-                    )
-                ],
+                limits: [codexWorkWeekly],
                 updatedAt: now,
                 sourceDescription: "Live local ChatGPT / Codex status",
-                bankedResets: BankedResets(availableCount: 1, credits: [
-                    BankedReset(id: "demo-work-reset", expiration: .date(now.addingTimeInterval(TimeInterval(7 * 86_400))))
-                ]),
+                bankedResets: codexWorkResets,
                 planName: "Business Pro Lite"
             )
 
+            let claudeWorkWeekly = UsageLimit(
+                id: "claude-work-weekly",
+                label: "Weekly",
+                usedPercent: 18,
+                resetsAt: now.addingTimeInterval(259_200),
+                durationMinutes: 10_080,
+                displayMode: .remaining
+            )
             demoUsage[claudeWork.id] = ProviderUsage(
                 provider: .claude,
-                limits: [
-                    UsageLimit(
-                        id: "claude-work-weekly",
-                        label: "Weekly",
-                        usedPercent: 18,
-                        resetsAt: now.addingTimeInterval(TimeInterval(3 * 86_400)),
-                        durationMinutes: 10_080,
-                        displayMode: .remaining
-                    )
-                ],
+                limits: [claudeWorkWeekly],
                 updatedAt: now,
                 sourceDescription: "Live local Claude usage",
                 planName: "Team"
