@@ -72,7 +72,7 @@ private enum SnapshotWriter {
             StatusLabel(store: store)
             Spacer(minLength: 24)
         }
-            .frame(width: 640, height: 32)
+            .frame(width: 720, height: 32)
             .foregroundStyle(Color.white)
             .background {
                 LinearGradient(
@@ -91,17 +91,16 @@ private enum SnapshotWriter {
             }
             .environment(\.colorScheme, .dark)
         try await writePNG(menuLabel, to: menuURL)
-        let accountsURL = outputURL.deletingLastPathComponent()
-            .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-accounts.png")
-        try await writePNG(AccountSettings(store: store)
-            .frame(width: 520, height: 720)
-            .background(Color(nsColor: .windowBackgroundColor)), to: accountsURL)
-        for provider in [UsageProvider.claude, .cursor] {
-            let providerURL = outputURL.deletingLastPathComponent()
-                .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-\(provider.rawValue).png")
-            try await writePNG(AccountSettings(store: store, selectedProvider: provider)
-                .frame(width: 520, height: 720)
-                .background(Color(nsColor: .windowBackgroundColor)), to: providerURL)
+
+        if CommandLine.arguments.contains("--snapshot-accounts") {
+            let accountsURL = outputURL.deletingLastPathComponent()
+                .appending(path: outputURL.deletingPathExtension().lastPathComponent + "-accounts.png")
+            try await writePNG(
+                AccountSettings(store: store)
+                    .frame(width: 560, height: 740)
+                    .background(Color(nsColor: .windowBackgroundColor)),
+                to: accountsURL
+            )
         }
     }
 
@@ -110,8 +109,12 @@ private enum SnapshotWriter {
         let view = NSHostingView(rootView: content)
         var size = view.fittingSize
         view.frame = NSRect(origin: .zero, size: size)
-        let window = NSWindow(contentRect: view.frame, styleMask: .borderless,
-                              backing: .buffered, defer: false)
+        let window = NSWindow(
+            contentRect: view.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
         window.contentView = view
 
         // The popover measures its own cards, so its first proposal can exceed

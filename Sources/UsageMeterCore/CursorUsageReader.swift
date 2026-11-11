@@ -5,63 +5,50 @@ public enum CursorUsageReader {
         string: "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
     )!
 
-    public static func signIn(account: CursorAccount) async throws { try await CursorLogin.signIn(account: account) }
+    public static func fetch(
+        account: ProviderAccount = .defaultAccount(for: .cursor),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) async throws -> ProviderUsage {
+        try await fetch(
+            account: account,
+            loadLocal: { account in
+                try await Task.detached(priority: .utility) {
+                    try readLocalAuth(account: account, home: home)
+                }.value
+            },
+            request: { request in
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw UsageReadError.malformedCursorResponse
+                }
+                return (data, http)
+            }
+        )
+    }
 
-    public static func removeLogin(account: CursorAccount) throws { try CursorCredentials.remove(account: account) }
-
-    public static func fetch(account: CursorAccount = .defaultAccount) async throws -> ProviderUsage {
-        try await fetch(account: account, loadLocal: {
-            try await Task.detached(priority: .utility) { try readAccessToken() }.value
-        }, loadLogin: { account in
-            try await Task.detached(priority: .utility) { try CursorCredentials.read(account: account) }.value
-        }, saveLogin: { try CursorCredentials.save($0, account: account) },
-           request: { try await CursorHTTP.request($0) })
+    struct LocalCursorAuth: Sendable {
+        let accessToken: String
+        let planName: String?
     }
 
     static func fetch(
-        account: CursorAccount,
-        loadLocal: @Sendable () async throws -> String,
-        loadLogin: @Sendable (CursorAccount) async throws -> CursorCredentials,
-        saveLogin: @Sendable (CursorCredentials) async throws -> Void,
+        account: ProviderAccount,
+        loadLocal: @Sendable (ProviderAccount) async throws -> LocalCursorAuth,
         request: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     ) async throws -> ProviderUsage {
-        guard account.isValid else { throw UsageReadError.cursorSignedOut }
-        var credentials: CursorCredentials?
-        var refreshed = false
-        let token: String
-        if account.mode == .local {
-            token = try await loadLocal()
-        } else {
-            var login = try await loadLogin(account)
-            if login.needsRefresh() {
-                login = try await renew(login, save: saveLogin, request: request)
-                refreshed = true
-            }
-            credentials = login
-            token = login.accessToken
+        guard account.isValid, account.provider == .cursor else {
+            throw UsageReadError.cursorSignedOut
         }
-        var (data, response) = try await request(usageRequest(token: token))
-        if response.statusCode == 401, !refreshed, let credentials {
-            let renewed = try await renew(credentials, save: saveLogin, request: request)
-            (data, response) = try await request(usageRequest(token: renewed.accessToken))
+        let localAuth = try await loadLocal(account)
+        let (data, response) = try await request(usageRequest(token: localAuth.accessToken))
+        if response.statusCode == 401 || response.statusCode == 403 {
+            throw UsageReadError.cursorAuthorizationFailed
         }
-        if response.statusCode == 401 || response.statusCode == 403 { throw UsageReadError.cursorAuthorizationFailed }
-        guard (200..<300).contains(response.statusCode) else { throw UsageReadError.malformedCursorResponse }
+        guard (200..<300).contains(response.statusCode) else {
+            throw UsageReadError.malformedCursorResponse
+        }
         try Task.checkCancellation()
-        return try parse(data: data, now: Date())
-    }
-
-    private static func renew(
-        _ credentials: CursorCredentials,
-        save: @Sendable (CursorCredentials) async throws -> Void,
-        request: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
-    ) async throws -> CursorCredentials {
-        let (data, response) = try await request(CursorLogin.refreshRequest(credentials: credentials))
-        guard response.statusCode == 200 else { throw UsageReadError.cursorAuthorizationFailed }
-        let renewed = try CursorLogin.refreshedCredentials(data: data)
-        try Task.checkCancellation()
-        try await save(renewed)
-        return renewed
+        return try parse(data: data, now: Date(), planName: localAuth.planName)
     }
 
     static func usageRequest(token: String) -> URLRequest {
@@ -74,16 +61,13 @@ public enum CursorUsageReader {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
         request.setValue(cursorVersion(), forHTTPHeaderField: "x-cursor-client-version")
-
         return request
     }
 
-    public static func parse(data: Data, now: Date) throws -> ProviderUsage {
-        guard
-            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let planUsage = root["planUsage"] as? [String: Any],
-            let usedPercent = (planUsage["autoPercentUsed"] as? NSNumber)?.doubleValue
-        else {
+    public static func parse(data: Data, now: Date, planName: String? = nil) throws -> ProviderUsage {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let planUsage = root["planUsage"] as? [String: Any],
+              let usedPercent = (planUsage["autoPercentUsed"] as? NSNumber)?.doubleValue else {
             throw UsageReadError.malformedCursorResponse
         }
 
@@ -101,45 +85,49 @@ public enum CursorUsageReader {
             provider: .cursor,
             limits: [limit],
             updatedAt: now,
-            sourceDescription: "Live Cursor first-party pool"
+            sourceDescription: "Live local Cursor pool",
+            planName: planName
         )
     }
 
-    private static func readAccessToken() throws -> String {
-        let database = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    private static func readLocalAuth(account: ProviderAccount, home: URL) throws -> LocalCursorAuth {
+        let database = account.resolvedCursorDirectory(home: home)
+            .appending(path: "User/globalStorage/state.vscdb")
         guard FileManager.default.fileExists(atPath: database.path) else {
             throw UsageReadError.cursorNotFound
         }
 
+        guard let rawToken = queryItemValue(database: database, key: "cursorAuth/accessToken") else {
+            throw UsageReadError.cursorSignedOut
+        }
+        let rawPlan = queryItemValue(database: database, key: "cursorAuth/stripeMembershipType")
+        return LocalCursorAuth(
+            accessToken: rawToken,
+            planName: AccountPlan.cursor(rawPlan)
+        )
+    }
+
+    private static func queryItemValue(database: URL, key: String) -> String? {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         process.arguments = [
             "-readonly",
             database.path,
-            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1;",
+            "SELECT value FROM ItemTable WHERE key = '\(key)' LIMIT 1;",
         ]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
-        try process.run()
-        let data = try output.fileHandleForReading.readToEnd() ?? Data()
+        do { try process.run() } catch { return nil }
+        let data = (try? output.fileHandleForReading.readToEnd()) ?? Data()
         process.waitUntilExit()
-
-        guard
-            process.terminationStatus == 0,
-            let raw = String(data: data, encoding: .utf8)?
+        guard process.terminationStatus == 0,
+              let raw = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            !raw.isEmpty
-        else {
-            throw UsageReadError.cursorSignedOut
-        }
-
-        if
-            let encoded = raw.data(using: .utf8),
-            let decoded = try? JSONDecoder().decode(String.self, from: encoded),
-            !decoded.isEmpty
-        {
+              !raw.isEmpty else { return nil }
+        if let encoded = raw.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(String.self, from: encoded),
+           !decoded.isEmpty {
             return decoded
         }
         return raw
@@ -161,5 +149,19 @@ public enum CursorUsageReader {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return TimeInterval(string) }
         return nil
+    }
+
+    private static let session = URLSession(configuration: .ephemeral, delegate: NoCursorRedirects(), delegateQueue: nil)
+}
+
+private final class NoCursorRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }

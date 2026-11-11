@@ -8,10 +8,10 @@ struct StatusLabel: View {
     var body: some View {
         Group {
             if store.visibleEntries.isEmpty {
-                Image(systemName: "gauge")
+                Image(systemName: "gauge.with.dots.needle.67percent")
                     .frame(width: 18, height: 18)
             } else {
-                Image(nsImage: MenuBarArtwork.image(groups: store.menuGroups))
+                Image(nsImage: MenuBarArtwork.image(groups: store.menuGroups, style: store.menuBarStyle))
                     .renderingMode(.template)
             }
         }
@@ -24,22 +24,35 @@ struct StatusLabel: View {
 private enum MenuBarArtwork {
     private static let height: CGFloat = 18
     private static let iconSize: CGFloat = 14
-    private static let barSize = NSSize(width: 24, height: 5)
+    private static let barSize = NSSize(width: 22, height: 5)
     private static let innerSpacing: CGFloat = 3
     private static let meterSpacing: CGFloat = 5
-    private static let providerSpacing: CGFloat = 11
+    private static let providerSpacing: CGFloat = 10
     private static let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
 
-    static func image(groups: [(provider: UsageProvider, percents: [Int?])]) -> NSImage {
+    static func image(
+        groups: [(provider: UsageProvider, percents: [Int?])],
+        style: MenuBarStyle
+    ) -> NSImage {
+        let showsBar = style != .percentOnly
+        let showsPercent = style != .barsOnly
+
         let labels = groups.map { $0.percents.map(label(for:)) }
         let widths = labels.map { $0.map { ceil($0.size().width) } }
         let groupWidths = groups.indices.map { index -> CGFloat in
-            let meters = widths[index].reduce(0) { $0 + barSize.width + innerSpacing + $1 }
-            return iconSize + innerSpacing + meters
+            let meterWidths = widths[index].reduce(CGFloat(0)) { partial, labelWidth in
+                var itemWidth: CGFloat = 0
+                if showsBar { itemWidth += barSize.width }
+                if showsBar && showsPercent { itemWidth += innerSpacing }
+                if showsPercent { itemWidth += labelWidth }
+                return partial + itemWidth
+            }
+            return iconSize + innerSpacing + meterWidths
                 + meterSpacing * CGFloat(max(0, groups[index].percents.count - 1))
         }
-        let totalWidth = ceil(
-            groupWidths.reduce(0, +) + providerSpacing * CGFloat(max(0, groups.count - 1))
+        let totalWidth = max(
+            18,
+            ceil(groupWidths.reduce(0, +) + providerSpacing * CGFloat(max(0, groups.count - 1)))
         )
 
         let image = NSImage(
@@ -60,12 +73,17 @@ private enum MenuBarArtwork {
                 x += iconSize + innerSpacing
 
                 for meter in group.percents.indices {
-                    drawBar(percent: group.percents[meter], at: NSPoint(x: x, y: (height - barSize.height) / 2))
-                    x += barSize.width + innerSpacing
+                    if showsBar {
+                        drawBar(percent: group.percents[meter], at: NSPoint(x: x, y: (height - barSize.height) / 2))
+                        x += barSize.width
+                        if showsPercent { x += innerSpacing }
+                    }
 
-                    let label = labels[index][meter]
-                    label.draw(at: NSPoint(x: x, y: floor((height - label.size().height) / 2)))
-                    x += widths[index][meter]
+                    if showsPercent {
+                        let label = labels[index][meter]
+                        label.draw(at: NSPoint(x: x, y: floor((height - label.size().height) / 2)))
+                        x += widths[index][meter]
+                    }
 
                     if meter < group.percents.index(before: group.percents.endIndex) {
                         x += meterSpacing
@@ -114,22 +132,30 @@ struct UsagePopover: View {
     @ObservedObject var store: UsageStore
     @State private var contentHeight: CGFloat = 0
 
-    private static let maximumListHeight: CGFloat = 600
+    private static let maximumListHeight: CGFloat = 650
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 11) {
             header
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     ForEach(store.visibleEntries) { entry in
                         ProviderCard(entry: entry)
                     }
                     if store.visibleEntries.isEmpty {
-                        Text("All meters are hidden. Show them from Providers below.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding()
+                        VStack(spacing: 8) {
+                            Image(systemName: "eye.slash")
+                                .font(.title3)
+                                .foregroundStyle(.tertiary)
+                            Text("All meters are hidden.")
+                                .font(.callout.weight(.medium))
+                            Text("Enable local accounts from Providers below.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
                     }
                 }
                 .background {
@@ -139,9 +165,6 @@ struct UsagePopover: View {
                 }
             }
             .scrollBounceBehavior(.basedOnSize)
-            // MenuBarExtra proposes a compact size. A maximum alone lets the
-            // scroll view collapse, leaving only the header and Providers button,
-            // so the measured content height is applied as an explicit height.
             .frame(height: listHeight)
             .onPreferenceChange(ContentHeightKey.self) { height in
                 contentHeight = height
@@ -150,12 +173,11 @@ struct UsagePopover: View {
             footer
         }
         .padding(14)
-        .frame(width: 348)
+        .frame(width: 364)
     }
 
-    /// Shrink to the cards actually present, and scroll beyond the cap.
     private var listHeight: CGFloat {
-        guard !store.visibleEntries.isEmpty else { return 100 }
+        guard !store.visibleEntries.isEmpty else { return 112 }
         guard contentHeight > 0 else { return Self.maximumListHeight }
         return min(contentHeight, Self.maximumListHeight)
     }
@@ -164,27 +186,45 @@ struct UsagePopover: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Reset Meter")
-                    .font(.headline)
-                Text("Remaining usage")
-                    .font(.caption)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(subtitleText)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button {
+                AccountWindow.show(store: store)
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .background(Color.primary.opacity(0.06), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Providers & local accounts")
+
             if store.isRefreshing {
                 ProgressView()
                     .controlSize(.small)
+                    .frame(width: 26, height: 26)
             } else {
                 Button {
                     Task { await store.refresh() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .frame(width: 24, height: 24)
-                        .background(Color.primary.opacity(0.055), in: Circle())
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 26, height: 26)
+                        .background(Color.primary.opacity(0.06), in: Circle())
                 }
                 .buttonStyle(.plain)
-                .help("Refresh")
+                .help("Refresh usage")
             }
         }
+    }
+
+    private var subtitleText: String {
+        let count = store.visibleEntries.count
+        return count == 1 ? "Remaining capacity · 1 local meter" : "Remaining capacity · \(count) local meters"
     }
 
     private var footer: some View {
@@ -193,11 +233,15 @@ struct UsagePopover: View {
                 Text("Updated \(refreshed, style: .relative) ago")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            } else {
+                Text("Local read-only mode")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             Spacer()
             Button("Providers…") { AccountWindow.show(store: store) }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(.caption.weight(.medium))
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -221,17 +265,23 @@ extension UsageProvider {
         switch self {
         case .codex: Color(red: 0.20, green: 0.48, blue: 0.98)
         case .claude: Color(red: 217 / 255, green: 119 / 255, blue: 87 / 255)
-        case .cursor: Color(red: 0.48, green: 0.42, blue: 0.96)
+        case .antigravity: Color(red: 0.16, green: 0.58, blue: 0.98)
+        case .cursor: Color(red: 0.52, green: 0.44, blue: 0.97)
         }
     }
 
-    var iconTint: Color { self == .claude ? tint : .primary }
+    var iconTint: Color {
+        switch self {
+        case .claude, .antigravity: tint
+        case .codex, .cursor: .primary
+        }
+    }
 }
 
 struct ProviderCard<Controls: View>: View {
     let entry: UsageEntry
     var visibility: Binding<Bool>?
-    var showsAccountName = true
+    var showsAccountSubtitle = true
     @ViewBuilder let controls: Controls
 
     private var provider: UsageProvider { entry.provider }
@@ -240,37 +290,45 @@ struct ProviderCard<Controls: View>: View {
     private var tint: Color { provider.tint }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 8) {
-                ProviderIcon(provider: provider, size: 28, tint: provider.iconTint)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 9) {
+                ProviderIcon(provider: provider, size: 22, tint: provider.iconTint)
+                    .frame(width: 30, height: 30)
+                    .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         Text(provider.displayName)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(size: 13.5, weight: .semibold))
+                        if showsAccountSubtitle, let subtitle = entry.visibleAccountSubtitle {
+                            Text("· \(subtitle)")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                         if let usage {
                             StatusDot(usage: usage)
                         }
                     }
-                    if showsAccountName, let accountName = entry.accountName {
-                        Text(accountName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help(accountName)
-                    }
-                    if let plan = entry.planLabel {
-                        Text(plan)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help("Account plan: \(plan)")
-                            .accessibilityLabel("Account plan: \(plan)")
-                    }
                 }
-                Spacer()
+
+                Spacer(minLength: 4)
+
+                if let plan = entry.planLabel {
+                    Text(plan)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.065), in: Capsule())
+                        .help("Account plan: \(plan)")
+                        .accessibilityLabel("Account plan: \(plan)")
+                }
+
                 if let visibility {
                     Toggle("Show", isOn: visibility)
+                        .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
                         .accessibilityLabel("Show \(entry.displayName)")
@@ -281,8 +339,10 @@ struct ProviderCard<Controls: View>: View {
             controls
 
             if let usage {
-                ForEach(usage.limits) { limit in
-                    LimitRow(limit: limit, tint: tint)
+                VStack(spacing: 8) {
+                    ForEach(usage.limits) { limit in
+                        LimitRow(limit: limit, tint: tint)
+                    }
                 }
 
                 if provider == .codex {
@@ -291,7 +351,19 @@ struct ProviderCard<Controls: View>: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    BankedResetsView(resets: usage.bankedResets)
+                    if let resets = usage.bankedResets, resets.availableCount > 0 {
+                        BankedResetsView(resets: resets)
+                    }
+                }
+
+                if let footnote = usage.footnote {
+                    HStack(spacing: 5) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10))
+                        Text(footnote)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
             } else {
                 Text(error ?? "Loading…")
@@ -301,14 +373,14 @@ struct ProviderCard<Controls: View>: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(11)
         .background {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color.primary.opacity(0.045))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.042))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.075), lineWidth: 1)
         }
     }
 }
@@ -327,15 +399,23 @@ private struct LimitRow: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            VStack(spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
+            VStack(spacing: 4.5) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(limit.label)
-                        .font(.caption)
+                        .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Spacer()
+                    Spacer(minLength: 6)
+                    if let resetLabel = resetText(now: context.date) {
+                        Text(resetLabel)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
                     Text("\(Int(limit.displayPercent.rounded()))%")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(percentColor)
                         .monospacedDigit()
+                        .frame(minWidth: 32, alignment: .trailing)
                 }
 
                 GeometryReader { geometry in
@@ -343,18 +423,10 @@ private struct LimitRow: View {
                         Capsule().fill(Color.primary.opacity(0.08))
                         Capsule()
                             .fill(barColor)
-                            .frame(width: geometry.size.width * limit.displayPercent / 100)
+                            .frame(width: max(0, geometry.size.width * limit.displayPercent / 100))
                     }
                 }
-                .frame(height: 7)
-
-                HStack {
-                    Spacer()
-                    Text(resetText(now: context.date))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
+                .frame(height: 6)
             }
         }
     }
@@ -367,12 +439,19 @@ private struct LimitRow: View {
         }
     }
 
-    private func resetText(now: Date) -> String {
-        guard let reset = limit.resetsAt else { return "Reset unavailable" }
-        let prefix = limit.resetIsEstimated ? "Resets ≈ " : "Resets in "
-        return prefix + UsageCountdown.duration(max(0, reset.timeIntervalSince(now)))
+    private var percentColor: Color {
+        switch limit.usedPercent {
+        case 90...: .red
+        case 75...: .orange
+        default: .primary
+        }
     }
 
+    private func resetText(now: Date) -> String? {
+        guard let reset = limit.resetsAt else { return nil }
+        let prefix = limit.resetIsEstimated ? "≈ " : "Resets in "
+        return prefix + UsageCountdown.duration(max(0, reset.timeIntervalSince(now)))
+    }
 }
 
 enum UsageCountdown {
@@ -390,8 +469,6 @@ enum UsageCountdown {
     }
 }
 
-/// Replaces the former status line: hover or VoiceOver still reports the
-/// source, staleness, and whether a reset time is estimated.
 private struct StatusDot: View {
     let usage: ProviderUsage
 
@@ -405,13 +482,13 @@ private struct StatusDot: View {
 
     private var description: String {
         var parts = [usage.sourceDescription]
-        if usage.isStale { parts.append("stale") }
+        if usage.isStale { parts.append("cached") }
         if usage.limits.contains(where: \.resetIsEstimated) { parts.append("reset ≈ estimated") }
         return parts.joined(separator: " · ")
     }
 }
 
-private struct ProviderIcon: View {
+struct ProviderIcon: View {
     let provider: UsageProvider
     let size: CGFloat
     var tint: Color = .primary
@@ -427,8 +504,7 @@ private struct ProviderIcon: View {
                 Image(systemName: fallbackSymbol)
                     .resizable()
                     .scaledToFit()
-                    .padding(size * 0.2)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: size * 0.22))
+                    .padding(size * 0.15)
             }
         }
         .frame(width: size, height: size)
@@ -442,23 +518,21 @@ private struct ProviderIcon: View {
         switch provider {
         case .codex: "terminal.fill"
         case .claude: "sparkles"
+        case .antigravity: "aqi.medium"
         case .cursor: "cursorarrow"
         }
     }
 }
 
-private enum ProviderArtwork {
+enum ProviderArtwork {
     static func image(for provider: UsageProvider, size: CGFloat) -> NSImage? {
-        guard let url = Bundle.main.url(forResource: provider.rawValue, withExtension: "svg") else {
-            return nil
-        }
-        guard let source = NSImage(contentsOf: url), source.size.width > 0, source.size.height > 0 else {
+        guard let url = Bundle.main.url(forResource: provider.rawValue, withExtension: "svg"),
+              let source = NSImage(contentsOf: url),
+              source.size.width > 0,
+              source.size.height > 0 else {
             return nil
         }
 
-        // MenuBarExtra can otherwise honor the SVG's large intrinsic canvas.
-        // Render onto a native point-sized square while preserving each logo's
-        // original aspect ratio (Cursor's official cube is slightly taller).
         let canvas = NSSize(width: size, height: size)
         let scale = min(canvas.width / source.size.width, canvas.height / source.size.height)
         let fitted = NSSize(width: source.size.width * scale, height: source.size.height * scale)

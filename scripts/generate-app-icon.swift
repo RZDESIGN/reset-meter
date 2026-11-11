@@ -57,8 +57,8 @@ func renderIcon(pixelSize: Int) throws -> Data {
         yRadius: 210
     )
     NSGradient(colors: [
-        NSColor(calibratedRed: 0.08, green: 0.10, blue: 0.16, alpha: 1),
-        NSColor(calibratedRed: 0.025, green: 0.03, blue: 0.055, alpha: 1),
+        NSColor(calibratedRed: 0.08, green: 0.11, blue: 0.18, alpha: 1),
+        NSColor(calibratedRed: 0.025, green: 0.035, blue: 0.065, alpha: 1),
     ])?.draw(in: tile, angle: -72)
 
     NSColor.white.withAlphaComponent(0.12).setStroke()
@@ -66,19 +66,20 @@ func renderIcon(pixelSize: Int) throws -> Data {
     tile.stroke()
 
     let rows: [(CGFloat, CGFloat, NSColor)] = [
-        (678, 0.76, NSColor(calibratedRed: 0.22, green: 0.49, blue: 1.00, alpha: 1)),
-        (476, 0.48, NSColor(calibratedRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)),
-        (274, 0.86, NSColor(calibratedRed: 0.48, green: 0.42, blue: 0.96, alpha: 1)),
+        (726, 0.81, NSColor(calibratedRed: 0.22, green: 0.49, blue: 1.00, alpha: 1)),
+        (562, 0.54, NSColor(calibratedRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)),
+        (398, 0.90, NSColor(calibratedRed: 0.16, green: 0.62, blue: 0.98, alpha: 1)),
+        (234, 0.72, NSColor(calibratedRed: 0.52, green: 0.44, blue: 0.97, alpha: 1)),
     ]
 
     for (y, progress, color) in rows {
-        let dot = NSBezierPath(ovalIn: NSRect(x: 176, y: y, width: 72, height: 72))
+        let dot = NSBezierPath(ovalIn: NSRect(x: 176, y: y, width: 64, height: 64))
         color.setFill()
         dot.fill()
 
-        let trackRect = NSRect(x: 282, y: y + 5, width: 564, height: 62)
-        let track = NSBezierPath(roundedRect: trackRect, xRadius: 31, yRadius: 31)
-        NSColor.white.withAlphaComponent(0.16).setFill()
+        let trackRect = NSRect(x: 276, y: y + 6, width: 570, height: 52)
+        let track = NSBezierPath(roundedRect: trackRect, xRadius: 26, yRadius: 26)
+        NSColor.white.withAlphaComponent(0.15).setFill()
         track.fill()
 
         let fillRect = NSRect(
@@ -87,7 +88,7 @@ func renderIcon(pixelSize: Int) throws -> Data {
             width: trackRect.width * progress,
             height: trackRect.height
         )
-        let fill = NSBezierPath(roundedRect: fillRect, xRadius: 31, yRadius: 31)
+        let fill = NSBezierPath(roundedRect: fillRect, xRadius: 26, yRadius: 26)
         color.setFill()
         fill.fill()
     }

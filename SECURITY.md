@@ -4,14 +4,15 @@
 
 Please report security issues through a private [GitHub security advisory](https://github.com/RZDESIGN/reset-meter/security/advisories/new). Do not include access tokens, usage-cache files, account identifiers, or unredacted screenshots in a public issue.
 
-## Credential handling
+## Read-only local credential handling
 
-Each connection explicitly selects Local or Login. Local uses the installed provider’s existing account. Login uses an isolated Reset Meter account and never silently falls back to Local. Mode switches clear previous readings, preserve the saved Login credentials, and do not sign the installed app out.
+Reset Meter operates strictly in read-only local mode. It does not run browser sign-in flows, does not write or delete macOS Keychain items, and never rewrites or rotates credentials belonging to your installed apps.
 
-Codex and Claude Login connections use separate private configuration directories, including when Login is selected on a default card. Browser sign-in and renewal use the provider’s own command. Claude Desktop’s native bundled command is discovered automatically; its Linux VM executable is excluded. Claude credentials stay in their directory-scoped Keychain entry or Claude Code’s protected fallback file. Reset Meter reads and deletes those entries with `/usr/bin/security`, the tool Claude Code itself uses for them, and never copies them elsewhere. Access tokens are sent only to `api.anthropic.com` for usage/profile requests. Claude renewal runs under a per-account lock and is never interrupted. Local Claude is read-only: it never renews or rewrites the installed login, and may fall back to the Claude app’s usage-history cache; Login never does.
+- **Codex**: Invokes the locally installed `codex` CLI (`app-server`, or the CLI bundled inside `ChatGPT.app`) pointed at the selected `CODEX_HOME` directory. Ambient `OPENAI_API_KEY`, `CODEX_API_KEY`, and `CODEX_ACCESS_TOKEN` environment variables are stripped before spawning the subprocess, and CLI stderr output is sanitized before display.
+- **Claude**: Reads existing local state per profile without ever calling refresh-token endpoints (avoiding single-use refresh-token races that would sign Claude Desktop or Claude Code out). Live OAuth tokens from active local Claude Code subprocesses or profile-scoped Keychain / `.credentials.json` entries are held only in memory and sent exclusively over HTTPS to `api.anthropic.com` with redirects and cookies disabled.
+- **Antigravity**: Reads the active local Antigravity `language_server` process CSRF token and loopback listening ports, connecting exclusively to `127.0.0.1` (`GetUserStatus`). Loopback TLS validation accepts self-signed certificates strictly when the target host is `127.0.0.1` or `localhost`.
+- **Cursor**: Reads `cursorAuth/accessToken` from the local `state.vscdb` SQLite database using `/usr/bin/sqlite3 -readonly` without modifying the database, holds the token only in memory, and sends it exclusively to `api2.cursor.sh` with redirects and cookies disabled.
 
-Cursor Local reads its existing access token from the app’s database without changing it. Cursor Login uses the provider’s browser exchange with a cryptographically random PKCE verifier, polls only `api2.cursor.sh`, and stores the resulting tokens in a per-account entry in this Mac’s login Keychain, protected by its normal application access controls. Renewal goes only to Cursor’s token endpoint. Login URLs contain the PKCE challenge, not the verifier or tokens. Polling failures are sanitized so verifier URLs cannot appear in the UI.
+Local snapshot caches stored under `~/Library/Application Support/Reset Meter/Usage Cache/` contain only usage percentages, reset timestamps, and subscription plan names — never tokens, organization UUIDs, email addresses, or personal paths. Account identifiers and custom profile paths are validated against path traversal before use.
 
-Claude and Cursor requests disable redirects and cookie handling. No credentials are saved in preferences or logs. Removing an added account deletes its private Reset Meter login and scoped Keychain item, even if the account was switched to Local before removal. Local app credentials are never deleted.
-
-Release signing credentials are supplied externally through the macOS keychain. They must never be committed to this repository.
+Release signing credentials are supplied externally through the macOS Keychain. They must never be committed to this repository.

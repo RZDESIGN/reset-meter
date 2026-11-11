@@ -6,13 +6,13 @@
     {
       "file": "reset-meter.png",
       "content": "usage popover",
-      "width": 768,
-      "height": 1210
+      "width": 800,
+      "height": 1224
     },
     {
       "file": "reset-meter-menu.png",
       "content": "compact menu-bar label",
-      "width": 1280,
+      "width": 1440,
       "height": 64
     }
   ]

@@ -25,136 +25,104 @@ func claudeDoesNotInventUsageForMissingOrMalformedWindows(_ json: String) {
     #expect(throws: UsageReadError.self) { try ClaudeUsageReader.parse(data: Data(json.utf8), now: .now) }
 }
 
-@Test func claudeToleratesUnknownWindowsAndMissingReset() throws {
-    let usage = try ClaudeUsageReader.parse(data: Data(#"{"future_window":{"utilization":10},"five_hour":{"utilization":100,"resets_at":"invalid"}}"#.utf8), now: .now)
-    #expect(usage.headlinePercent == 0)
-    #expect(usage.limits.count == 1)
-    #expect(usage.limits[0].resetsAt == nil)
-    #expect(usage.planName == nil)
-}
-
-@Test func claudePlanComesFromProfileIncludingMaxTier() {
+@Test func claudePlanAndMetadataParseAcrossTiersAndLocalConfig() {
     let profile = Data(#"{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}"#.utf8)
     #expect(ClaudeUsageReader.parsePlan(profile) == "Max 20×")
     #expect(AccountPlan.claude("max", rateLimitTier: "default_claude_max_5x") == "Max 5×")
-    #expect(AccountPlan.claude("max", rateLimitTier: "future_tier") == "Max")
     #expect(AccountPlan.claude("claude_team") == "Team")
-    #expect(AccountPlan.claude("individual") == nil)
-    #expect(ClaudeUsageReader.parsePlan(Data("{}".utf8)) == nil)
-    #expect(AccountPlan.codex("unknown") == nil)
-    #expect(AccountPlan.codex(" ") == nil)
+    #expect(AccountPlan.codex("self_serve_business_prolite") == "Business Pro Lite")
+
+    let localConfig = Data(#"""
+    {"oauthAccount":{"organizationUuid":"org-work-1","organizationType":"claude_team","userRateLimitTier":"default_raven"}}
+    """#.utf8)
+    let metadata = ClaudeLocalMetadata.parseClaudeJSON(localConfig)
+    #expect(metadata?.organizationUUID == "org-work-1")
+    #expect(metadata?.planName == "Team")
 }
 
-@Test func claudeCredentialsRequireProfileScopeAndDetectExpiration() throws {
-    let data = Data(#"{"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic-refresh","expiresAt":1000000,"scopes":["user:profile"],"subscriptionType":"pro"}}"#.utf8)
-    let credentials = try ClaudeCredentials.parse(data)
-    #expect(credentials.planName == "Pro")
-    #expect(!credentials.needsRefresh(now: Date(timeIntervalSince1970: 900)))
-    #expect(credentials.needsRefresh(now: Date(timeIntervalSince1970: 941)))
-    // An unknown expiry waits for a 401 instead of renewing on every read.
-    let unknown = try ClaudeCredentials.parse(Data(#"{"claudeAiOauth":{"accessToken":"synthetic","expiresAt":0,"scopes":["user:profile"]}}"#.utf8))
-    #expect(!unknown.needsRefresh(now: .now))
-    #expect(throws: UsageReadError.self) {
-        try ClaudeCredentials.parse(Data(#"{"claudeAiOauth":{"accessToken":"synthetic","scopes":["user:inference"]}}"#.utf8))
-    }
-    #expect(throws: UsageReadError.self) { try ClaudeCredentials.parse(Data("{}".utf8)) }
+@Test func claudeMatchesActiveDesktopProcessStrictlyByOrganizationOrProfile() {
+    let psPersonal = "/Users/demo/Library/Application Support/Claude/claude-code/2.1.321/claude.app/Contents/MacOS/claude CLAUDE_CODE_OAUTH_TOKEN=tok-personal CLAUDE_CODE_ORGANIZATION_UUID=org-personal CLAUDE_CODE_SUBSCRIPTION_TYPE=max CLAUDE_CODE_RATE_LIMIT_TIER=default_claude_max_20x"
+    let psWork = "/Users/demo/Library/Application Support/Claude-Work/claude-code/2.1.321/claude.app/Contents/MacOS/claude CLAUDE_CONFIG_DIR=/Users/demo/.claude-work CLAUDE_CODE_OAUTH_TOKEN=tok-work CLAUDE_CODE_ORGANIZATION_UUID=org-work CLAUDE_CODE_SUBSCRIPTION_TYPE=team"
+
+    let matchedPersonal = ClaudeCredentials.matchDesktopProcessEnvironment(
+        psOutput: psPersonal,
+        expectedOrganizationUUID: "org-personal",
+        expectedCodeDir: "/Users/demo/.claude",
+        expectedDesktopPrefix: "/Users/demo/Library/Application Support/Claude/claude-code",
+        isDefaultCodeDir: true
+    )
+    #expect(matchedPersonal?.accessToken == "tok-personal")
+    #expect(matchedPersonal?.planName == "Max 20×")
+
+    // Work account must reject personal process and accept only work process.
+    let rejectedCrossMatch = ClaudeCredentials.matchDesktopProcessEnvironment(
+        psOutput: psPersonal,
+        expectedOrganizationUUID: "org-work",
+        expectedCodeDir: "/Users/demo/.claude-work",
+        expectedDesktopPrefix: "/Users/demo/Library/Application Support/Claude-Work/claude-code",
+        isDefaultCodeDir: false
+    )
+    #expect(rejectedCrossMatch == nil)
+
+    let matchedWork = ClaudeCredentials.matchDesktopProcessEnvironment(
+        psOutput: psWork,
+        expectedOrganizationUUID: "org-work",
+        expectedCodeDir: "/Users/demo/.claude-work",
+        expectedDesktopPrefix: "/Users/demo/Library/Application Support/Claude-Work/claude-code",
+        isDefaultCodeDir: false
+    )
+    #expect(matchedWork?.accessToken == "tok-work")
+    #expect(matchedWork?.planName == "Team")
 }
 
-@Test(arguments: [false, true]) func claudeRenewsExpiredOrRejectedCredentialsOnce(expired: Bool) async throws {
-    let transport = ClaudeTestTransport(expired: expired)
-    let account = ClaudeAccount(name: "Work")
-    let usage = try await ClaudeUsageReader.fetch(account: account,
-        loadCredentials: { try await transport.credentials(for: $0) },
-        refreshCredentials: { try await transport.refresh($0, credentials: $1) },
-        request: { await transport.request($0) })
-    #expect(usage.headlinePercent == 80)
-    #expect(usage.planName == "Max 20×") // Live profile replaces cached Pro metadata.
-    #expect(await transport.refreshCount == 1)
-    #expect(await transport.accountIDs == [account.id, account.id, account.id])
-    #expect(await transport.usageRequestCount == (expired ? 1 : 2))
+@Test func claudeDesktopCacheIgnoresExtraUsageCapAndPreservesVerifiedFutureReset() throws {
+    // `xu: 100` (extra usage spend cap) must never override `fh: 0, sd: 0` (100% included capacity left).
+    let data = Data(#"""
+    {"version":2,"samples":[
+      {"t":1000000,"org":"org-personal","u":{"sd":80}},
+      {"t":2000000,"org":"org-work","u":{"fh":0,"sd":0,"xu":100}}
+    ]}
+    """#.utf8)
+
+    let futureReset = Date(timeIntervalSince1970: 10_000)
+    let previous = ProviderUsage(
+        provider: .claude,
+        limits: [UsageLimit(id: "claude-seven_day", label: "Weekly", usedPercent: 10, resetsAt: futureReset, displayMode: .remaining)],
+        updatedAt: Date(timeIntervalSince1970: 1_500),
+        sourceDescription: "Live",
+        planName: "Team"
+    )
+
+    let workUsage = try ClaudeDesktopUsageReader.parse(
+        data: data,
+        now: Date(timeIntervalSince1970: 2_100),
+        organizationUUID: "org-work",
+        planName: "Team",
+        previousSnapshot: previous
+    )
+    #expect(workUsage.headlinePercent == 100)
+    #expect(workUsage.planName == "Team")
+    #expect(workUsage.limits.map(\.label) == ["5-hour", "Weekly"])
+    #expect(workUsage.limits[1].resetsAt == futureReset)
 }
 
-@Test func claudeUsageSurvivesProfileFailureWithoutGuessingPlan() async throws {
-    let credentials = ClaudeCredentials(accessToken: "synthetic", refreshToken: nil, expiresAt: nil,
-        scopes: ["user:profile"], subscriptionType: nil, rateLimitTier: nil)
-    let usage = try await ClaudeUsageReader.fetch(account: .defaultAccount,
-        loadCredentials: { _ in credentials },
-        refreshCredentials: { _, _ in Issue.record("Should not refresh a valid token") },
-        request: { request in
-            let isUsage = request.url?.lastPathComponent == "usage"
-            let response = HTTPURLResponse(url: request.url!, statusCode: isUsage ? 200 : 503,
-                                           httpVersion: nil, headerFields: nil)!
-            return (Data(#"{"five_hour":{"utilization":0}}"#.utf8), response)
-        })
-    #expect(usage.headlinePercent == 100)
-    #expect(usage.planName == nil)
-}
+@Test func claudeLocalLayerPipelineFallsThroughGracefullyWithoutMutatingLogins() async throws {
+    let account = ProviderAccount.defaultAccount(for: .claude)
+    let cachedUsage = ProviderUsage(
+        provider: .claude,
+        limits: [UsageLimit(id: "claude-seven_day", label: "Weekly", usedPercent: 25, resetsAt: nil, displayMode: .remaining)],
+        updatedAt: .now,
+        sourceDescription: "Local Claude Desktop cache",
+        isStale: true,
+        planName: "Max 20×"
+    )
 
-@Test(arguments: [false, true]) func claudeLocalNeverRenewsTheInstalledLogin(expired: Bool) async {
-    let transport = ClaudeTestTransport(expired: expired)
-    await #expect(throws: UsageReadError.claudeAuthorizationFailed) {
-        try await ClaudeUsageReader.fetch(account: .defaultAccount,
-            loadCredentials: { try await transport.credentials(for: $0) },
-            refreshCredentials: { try await transport.refresh($0, credentials: $1) },
-            request: { await transport.request($0) })
-    }
-    #expect(await transport.refreshCount == 0)
-    #expect(await transport.usageRequestCount == (expired ? 0 : 1))
-}
-
-@Test(arguments: [401, 403, 429, 500]) func claudeFailuresDoNotExposeResponseBodies(status: Int) async {
-    let transport = ClaudeTestTransport(expired: false, failureStatus: status)
-    do {
-        _ = try await ClaudeUsageReader.fetch(account: ClaudeAccount(name: "Work"),
-            loadCredentials: { try await transport.credentials(for: $0) },
-            refreshCredentials: { try await transport.refresh($0, credentials: $1) },
-            request: { await transport.request($0) })
-        Issue.record("Expected usage failure")
-    } catch {
-        #expect(error is UsageReadError)
-        #expect(!error.localizedDescription.contains("private diagnostic"))
-        #expect(await transport.refreshCount == (status == 401 ? 1 : 0))
-    }
-}
-
-private actor ClaudeTestTransport {
-    let expired: Bool
-    let failureStatus: Int?
-    var refreshCount = 0
-    var usageRequestCount = 0
-    var accountIDs: [String] = []
-
-    init(expired: Bool, failureStatus: Int? = nil) {
-        self.expired = expired
-        self.failureStatus = failureStatus
-    }
-
-    func credentials(for account: ClaudeAccount) throws -> ClaudeCredentials {
-        accountIDs.append(account.id)
-        return ClaudeCredentials(accessToken: refreshCount == 0 ? "synthetic-old" : "synthetic-new",
-            refreshToken: "synthetic-refresh", expiresAt: expired && refreshCount == 0 ? 1000 : nil,
-            scopes: ["user:profile"], subscriptionType: "pro", rateLimitTier: nil)
-    }
-
-    func refresh(_ account: ClaudeAccount, credentials: ClaudeCredentials) throws {
-        accountIDs.append(account.id)
-        #expect(credentials.refreshToken == "synthetic-refresh")
-        refreshCount += 1
-    }
-
-    func request(_ request: URLRequest) -> (Data, HTTPURLResponse) {
-        #expect(request.url?.host == "api.anthropic.com")
-        #expect(request.url?.scheme == "https")
-        #expect(request.httpMethod == "GET")
-        #expect(!request.httpShouldHandleCookies)
-        #expect(request.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20")
-        let isUsage = request.url?.lastPathComponent == "usage"
-        if isUsage { usageRequestCount += 1 }
-        let status = failureStatus ?? (isUsage && refreshCount == 0 ? 401 : 200)
-        let json = status != 200 ? #"{"error":"private diagnostic"}"# : isUsage
-            ? #"{"five_hour":{"utilization":20,"resets_at":null}}"#
-            : #"{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}"#
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer synthetic-\(refreshCount == 0 ? "old" : "new")")
-        return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
-    }
+    let resolved = try await ClaudeUsageReader.fetchLocalLayers(
+        account: account,
+        activeSession: { throw UsageReadError.claudeLocalUnavailable },
+        storedCredentials: { throw UsageReadError.claudeAuthorizationFailed },
+        desktopCache: { cachedUsage }
+    )
+    #expect(resolved.headlinePercent == 75)
+    #expect(resolved.planName == "Max 20×")
 }

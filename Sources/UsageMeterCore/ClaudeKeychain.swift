@@ -1,10 +1,8 @@
 import Foundation
 
 /// Claude Code writes each login with `/usr/bin/security`, which makes that
-/// tool the item's only trusted application. Reading it through the Security
-/// framework prompts for access, and that grant is lost whenever a renewal
-/// re-creates the item or Reset Meter's signature changes. Claude Code reads
-/// its own items through the same tool and arguments, which never prompts.
+/// tool the item's trusted application. Reading it read-only through the same
+/// tool and arguments never prompts for Keychain access and never mutates items.
 enum ClaudeKeychain {
     enum Lookup: Equatable, Sendable {
         case found(Data)
@@ -22,17 +20,14 @@ enum ClaudeKeychain {
     }
 
     static func read(service: String, tool: URL = tool, timeout: TimeInterval = 10) -> Lookup {
-        guard let (status, output) = run(tool, ["find-generic-password", "-a", accountName(), "-w", "-s", service],
-                                         timeout: timeout) else { return .unavailable }
+        guard let (status, output) = run(
+            tool,
+            ["find-generic-password", "-a", accountName(), "-w", "-s", service],
+            timeout: timeout
+        ) else { return .unavailable }
         if status == itemNotFound { return .missing }
         guard status == 0 else { return .unavailable }
         return decode(output).map(Lookup.found) ?? .missing
-    }
-
-    static func delete(service: String, tool: URL = tool) -> Bool {
-        guard let (status, _) = run(tool, ["delete-generic-password", "-a", accountName(), "-s", service])
-        else { return false }
-        return status == 0 || status == itemNotFound
     }
 
     /// `security -w` prints printable secrets verbatim and anything else as hex.
@@ -57,7 +52,6 @@ enum ClaudeKeychain {
         process.arguments = arguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
-        // Diagnostics can include item attributes. Credentials never enter logs.
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
         let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }

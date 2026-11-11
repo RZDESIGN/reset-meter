@@ -1,29 +1,23 @@
 import Foundation
 
 public enum CodexUsageReader {
-    public static func fetch(account: CodexAccount = .defaultAccount) async throws -> ProviderUsage {
-        let output = try await execute(account: account, login: false)
+    public static func fetch(
+        account: ProviderAccount = .defaultAccount(for: .codex)
+    ) async throws -> ProviderUsage {
+        let output = try await execute(account: account)
         return try parse(output: output, now: Date())
     }
 
-    public static func signIn(account: CodexAccount) async throws {
-        // Never change the login used by the user's regular Codex installation.
-        guard let home = account.homeDirectory else { throw UsageReadError.codexLoginFailed }
-        try FileManager.default.createDirectory(
-            at: home, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        _ = try await execute(account: account, login: true)
-    }
-
-    private static func execute(account: CodexAccount, login: Bool) async throws -> Data {
+    private static func execute(account: ProviderAccount) async throws -> Data {
         guard let executable = findCodexExecutable() else { throw UsageReadError.codexNotFound }
         let cancellation = CommandCancellation()
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .utility) {
                 try CodexCommand.run(
-                    executable: executable, account: account, login: login,
-                    timeout: login ? 180 : 20, cancellation: cancellation
+                    executable: executable,
+                    account: account,
+                    timeout: 20,
+                    cancellation: cancellation
                 )
             }.value
         } onCancel: {
@@ -47,17 +41,13 @@ public enum CodexUsageReader {
         }.first
 
         for object in messages.reversed() {
-            guard
-                (object["id"] as? NSNumber)?.intValue == 2
-            else { continue }
+            guard (object["id"] as? NSNumber)?.intValue == 2 else { continue }
             if object["error"] != nil { throw UsageReadError.codexAccountUnavailable }
             guard let result = object["result"] as? [String: Any] else { continue }
 
             let rateLimits: [String: Any]?
-            if
-                let buckets = result["rateLimitsByLimitId"] as? [String: Any],
-                let codex = buckets["codex"] as? [String: Any]
-            {
+            if let buckets = result["rateLimitsByLimitId"] as? [String: Any],
+               let codex = buckets["codex"] as? [String: Any] {
                 rateLimits = codex
             } else {
                 rateLimits = result["rateLimits"] as? [String: Any]
@@ -73,7 +63,7 @@ public enum CodexUsageReader {
                 provider: .codex,
                 limits: limits,
                 updatedAt: now,
-                sourceDescription: "Live Codex status",
+                sourceDescription: "Live local ChatGPT / Codex status",
                 bankedResets: bankedResets,
                 planName: accountPlan ?? AccountPlan.codex(rateLimits?["planType"] as? String)
             )
@@ -83,10 +73,8 @@ public enum CodexUsageReader {
     }
 
     private static func parseWindow(_ raw: Any?, key: String) -> UsageLimit? {
-        guard
-            let window = raw as? [String: Any],
-            let used = (window["usedPercent"] as? NSNumber)?.doubleValue
-        else { return nil }
+        guard let window = raw as? [String: Any],
+              let used = (window["usedPercent"] as? NSNumber)?.doubleValue else { return nil }
 
         let duration = (window["windowDurationMins"] as? NSNumber)?.intValue
         let resetSeconds = (window["resetsAt"] as? NSNumber)?.doubleValue
@@ -113,20 +101,41 @@ public enum CodexUsageReader {
         }
     }
 
-    private static func findCodexExecutable() -> URL? {
+    public static func findCodexExecutable(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        systemDirectories: [URL] = [
+            URL(fileURLWithPath: "/opt/homebrew/bin"),
+            URL(fileURLWithPath: "/usr/local/bin"),
+        ],
+        applicationDirectories: [URL] = [
+            URL(fileURLWithPath: "/Applications"),
+            FileManager.default.homeDirectoryForCurrentUser.appending(path: "Applications"),
+        ]
+    ) -> URL? {
         let fileManager = FileManager.default
-        let home = fileManager.homeDirectoryForCurrentUser
-        var candidates = [
-            URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
-            URL(fileURLWithPath: "/usr/local/bin/codex"),
+        var candidates: [URL] = systemDirectories.map { $0.appending(path: "codex") }
+        candidates += [
             home.appending(path: ".local/bin/codex"),
             home.appending(path: ".bun/bin/codex"),
-            URL(fileURLWithPath: "/Applications/Codex.app/Contents/Resources/codex"),
-            URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
-            home.appending(path: "Applications/Codex.app/Contents/Resources/codex"),
-            home.appending(path: "Applications/ChatGPT.app/Contents/Resources/codex"),
         ]
-        candidates += (ProcessInfo.processInfo.environment["PATH"] ?? "")
+
+        // Bundled CLI inside the official ChatGPT.app and Codex.app (both modern CodexCLI.app bundle and legacy Resources/codex).
+        let appNames = ["ChatGPT.app", "Codex.app"]
+        let relativeBundlePaths = [
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "Contents/Resources/codex",
+        ]
+        for appDir in applicationDirectories {
+            for appName in appNames {
+                let appURL = appDir.appending(path: appName)
+                for rel in relativeBundlePaths {
+                    candidates.append(appURL.appending(path: rel))
+                }
+            }
+        }
+
+        candidates += (environment["PATH"] ?? "")
             .split(separator: ":").filter { $0.hasPrefix("/") }
             .map { URL(fileURLWithPath: String($0)).appending(path: "codex") }
 

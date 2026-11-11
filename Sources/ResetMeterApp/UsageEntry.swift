@@ -1,29 +1,49 @@
 import Foundation
 import UsageMeterCore
 
+public enum MenuBarStyle: String, Codable, CaseIterable, Sendable {
+    case barsAndPercent
+    case barsOnly
+    case percentOnly
+
+    public var label: String {
+        switch self {
+        case .barsAndPercent: "Bars & %"
+        case .barsOnly: "Bars Only"
+        case .percentOnly: "% Only"
+        }
+    }
+}
+
 struct UsageEntry: Identifiable {
-    let provider: UsageProvider
-    var account: CodexAccount? = nil
-    var claudeAccount: ClaudeAccount? = nil
-    var cursorAccount: CursorAccount? = nil
+    let account: ProviderAccount
     let usage: ProviderUsage?
     let error: String?
+    var hasMultipleProviderAccounts = false
 
-    var id: String {
-        account.map { "codex:\($0.id)" }
-            ?? claudeAccount.map { "claude:\($0.id)" } ?? cursorAccount?.entryID ?? provider.rawValue
-    }
+    var id: String { account.id }
+    var provider: UsageProvider { account.provider }
 
     var displayName: String {
-        accountName.map { "\(provider.displayName) \($0)" } ?? provider.displayName
+        if let subtitle = visibleAccountSubtitle {
+            return "\(provider.displayName) \(subtitle)"
+        }
+        return provider.displayName
     }
 
-    var accountName: String? { account?.name ?? claudeAccount?.name ?? cursorAccount?.name }
+    var accountName: String { account.name }
 
-    var mode: ConnectionMode { account?.mode ?? claudeAccount?.mode ?? cursorAccount?.mode ?? .local }
+    /// Hide redundant "Default" subtitle when there is only a single account for that provider.
+    var visibleAccountSubtitle: String? {
+        let trimmed = account.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if !hasMultipleProviderAccounts && trimmed.caseInsensitiveCompare("Default") == .orderedSame {
+            return nil
+        }
+        return trimmed
+    }
 
     var planLabel: String? {
-        guard provider == .codex || provider == .claude else { return nil }
-        return usage?.planName ?? "Plan unavailable"
+        usage?.planName
     }
 }

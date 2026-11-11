@@ -3,214 +3,121 @@ import UsageMeterCore
 
 @MainActor
 final class UsageStore: ObservableObject {
-    @Published private(set) var codexAccounts: [CodexAccount]
-    @Published private(set) var codexUsage: [String: ProviderUsage] = [:]
-    @Published private(set) var codexErrors: [String: String] = [:]
-    @Published private(set) var signingInAccountID: String?
-    @Published private(set) var accountError: String?
-    private var signInTask: Task<Void, Never>?
-    private let preferences: UserDefaults
-    private static let accountsKey = "codexAccounts.v1"
-    private static let claudeAccountsKey = "claudeAccounts.v1"
-    private static let cursorAccountsKey = "cursorAccounts.v1"
-    private static let hiddenEntriesKey = "hiddenUsageEntries.v1"
+    @Published private(set) var accounts: [ProviderAccount]
+    @Published private(set) var usageByID: [String: ProviderUsage] = [:]
+    @Published private(set) var errorsByID: [String: String] = [:]
     @Published private(set) var hiddenEntryIDs: Set<String>
-    @Published private(set) var claudeAccounts: [ClaudeAccount]
-    @Published private(set) var claudeUsage: [String: ProviderUsage] = [:]
-    @Published private(set) var claudeErrors: [String: String] = [:]
-    @Published private(set) var cursorAccounts: [CursorAccount]
-    @Published private(set) var cursorUsage: [String: ProviderUsage] = [:]
-    @Published private(set) var cursorErrors: [String: String] = [:]
+    @Published var menuBarStyle: MenuBarStyle {
+        didSet {
+            preferences.set(menuBarStyle.rawValue, forKey: Self.menuBarStyleKey)
+        }
+    }
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefresh: Date?
 
+    private let preferences: UserDefaults
+    private static let accountsKey = "localAccounts.v2"
+    private static let hiddenEntriesKey = "hiddenUsageEntries.v2"
+    private static let legacyHiddenEntriesKey = "hiddenUsageEntries.v1"
+    private static let menuBarStyleKey = "menuBarStyle.v1"
+
     private var refreshTimer: Timer?
-    private let codexFetcher: @Sendable (CodexAccount) async throws -> ProviderUsage
-    private let claudeFetcher: @Sendable (ClaudeAccount) async throws -> ProviderUsage
-    private let codexSigner: @Sendable (CodexAccount) async throws -> Void
-    private let claudeSigner: @Sendable (ClaudeAccount) async throws -> Void
-    private let claudeLoginRemover: @Sendable (ClaudeAccount) throws -> Void
-    private let cursorFetcher: @Sendable (CursorAccount) async throws -> ProviderUsage
-    private let cursorSigner: @Sendable (CursorAccount) async throws -> Void
-    private let cursorLoginRemover: @Sendable (CursorAccount) throws -> Void
+    private let fetcher: @Sendable (ProviderAccount) async throws -> ProviderUsage
+    private let discoverer: @Sendable () -> [ProviderAccount]
+    private let antigravityInstalled: @Sendable () -> Bool
+    private let cursorInstalled: @Sendable () -> Bool
 
     init(
         autoRefresh: Bool = true,
         preferences: UserDefaults = .standard,
-        codexFetcher: @escaping @Sendable (CodexAccount) async throws -> ProviderUsage = { try await CodexUsageReader.fetch(account: $0) },
-        claudeFetcher: @escaping @Sendable (ClaudeAccount) async throws -> ProviderUsage = { try await ClaudeUsageReader.fetch(account: $0) },
-        codexSigner: @escaping @Sendable (CodexAccount) async throws -> Void = { try await CodexUsageReader.signIn(account: $0) },
-        claudeSigner: @escaping @Sendable (ClaudeAccount) async throws -> Void = { try await ClaudeUsageReader.signIn(account: $0) },
-        claudeLoginRemover: @escaping @Sendable (ClaudeAccount) throws -> Void = { try ClaudeUsageReader.removeLogin(account: $0) },
-        cursorFetcher: @escaping @Sendable (CursorAccount) async throws -> ProviderUsage = { try await CursorUsageReader.fetch(account: $0) },
-        cursorSigner: @escaping @Sendable (CursorAccount) async throws -> Void = { try await CursorUsageReader.signIn(account: $0) },
-        cursorLoginRemover: @escaping @Sendable (CursorAccount) throws -> Void = { try CursorUsageReader.removeLogin(account: $0) }
+        discoverer: @escaping @Sendable () -> [ProviderAccount] = { LocalInstallationDiscovery.discoverAll() },
+        antigravityInstalled: @escaping @Sendable () -> Bool = { LocalInstallationDiscovery.isAntigravityInstalled() },
+        cursorInstalled: @escaping @Sendable () -> Bool = { LocalInstallationDiscovery.isCursorInstalled() },
+        fetcher: (@Sendable (ProviderAccount) async throws -> ProviderUsage)? = nil
     ) {
         self.preferences = preferences
-        hiddenEntryIDs = Set(preferences.stringArray(forKey: Self.hiddenEntriesKey) ?? [])
-        self.codexFetcher = codexFetcher
-        self.claudeFetcher = claudeFetcher
-        self.codexSigner = codexSigner
-        self.claudeSigner = claudeSigner
-        self.claudeLoginRemover = claudeLoginRemover
-        self.cursorFetcher = cursorFetcher
-        self.cursorSigner = cursorSigner
-        self.cursorLoginRemover = cursorLoginRemover
-        let saved = preferences.data(forKey: Self.accountsKey)
-            .flatMap { try? JSONDecoder().decode([CodexAccount].self, from: $0) } ?? []
-        var seen = Set<String>()
-        let valid = saved.filter {
-            $0.isValid && seen.insert($0.id).inserted
+        self.discoverer = discoverer
+        self.antigravityInstalled = antigravityInstalled
+        self.cursorInstalled = cursorInstalled
+        self.fetcher = fetcher ?? Self.defaultFetch
+
+        if let rawStyle = preferences.string(forKey: Self.menuBarStyleKey),
+           let parsedStyle = MenuBarStyle(rawValue: rawStyle) {
+            self.menuBarStyle = parsedStyle
+        } else {
+            self.menuBarStyle = .barsAndPercent
         }
-        codexAccounts = valid.isEmpty ? [.defaultAccount] : valid
-        let savedClaude = preferences.data(forKey: Self.claudeAccountsKey)
-            .flatMap { try? JSONDecoder().decode([ClaudeAccount].self, from: $0) } ?? []
-        var seenClaude = Set<String>()
-        let validClaude = savedClaude.filter {
-            $0.isValid && seenClaude.insert($0.id).inserted
+
+        let discovered = Self.sanitizedAccounts(discoverer())
+        let hadSavedV2 = preferences.data(forKey: Self.accountsKey) != nil
+        let savedAccounts = preferences.data(forKey: Self.accountsKey)
+            .flatMap { try? JSONDecoder().decode([ProviderAccount].self, from: $0) }
+            .map(Self.sanitizedAccounts) ?? []
+
+        let merged = Self.mergeAccounts(saved: savedAccounts, discovered: discovered)
+        self.accounts = merged
+
+        if let savedHidden = preferences.array(forKey: Self.hiddenEntriesKey) as? [String] {
+            self.hiddenEntryIDs = Set(savedHidden)
+        } else {
+            // Migrate cleanly from v1 or fresh install: keep active local installations visible,
+            // while hiding unconfigured optional tools (e.g. Cursor if previously hidden or not installed).
+            var initialHidden = Set<String>()
+            let legacyHidden = Set(preferences.stringArray(forKey: Self.legacyHiddenEntriesKey) ?? [])
+            if legacyHidden.contains("cursor") || legacyHidden.contains("cursor:default") || !cursorInstalled() {
+                initialHidden.insert("cursor:default")
+            }
+            if !antigravityInstalled() {
+                initialHidden.insert("antigravity:default")
+            }
+            self.hiddenEntryIDs = initialHidden
+            preferences.set(initialHidden.sorted(), forKey: Self.hiddenEntriesKey)
         }
-        claudeAccounts = validClaude.isEmpty ? [.defaultAccount] : validClaude
-        let savedCursor = preferences.data(forKey: Self.cursorAccountsKey)
-            .flatMap { try? JSONDecoder().decode([CursorAccount].self, from: $0) } ?? []
-        var seenCursor = Set<String>()
-        let validCursor = savedCursor.filter { $0.isValid && seenCursor.insert($0.id).inserted }
-        cursorAccounts = validCursor.isEmpty ? [.defaultAccount] : validCursor
-        if hiddenEntryIDs.remove("claude") != nil {
-            hiddenEntryIDs.insert("claude:default")
-            preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
+
+        if !hadSavedV2 || merged != savedAccounts {
+            saveAccounts()
         }
+
         if autoRefresh {
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     await self?.refresh()
                 }
             }
-
             Task { [weak self] in
                 await self?.refresh()
             }
         }
     }
 
-    func loadDemoData(now: Date = .now, multipleAccounts: Bool = false) {
-        hiddenEntryIDs = []
-        let codexReset = now.addingTimeInterval(
-            TimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60)
-        )
-        let codexLimit = UsageLimit(
-            id: "codex-demo-weekly",
-            label: "Weekly",
-            usedPercent: 19,
-            resetsAt: codexReset,
-            durationMinutes: 10_080,
-            displayMode: .remaining
-        )
-        let codexDemo = ProviderUsage(
-            provider: .codex,
-            limits: [codexLimit],
-            updatedAt: now,
-            sourceDescription: "Live Codex status",
-            bankedResets: BankedResets(availableCount: 2, credits: [
-                BankedReset(id: "demo-reset-1", expiration: .date(now.addingTimeInterval(2 * 86_400))),
-                BankedReset(id: "demo-reset-2", expiration: .date(now.addingTimeInterval(14 * 86_400)))
-            ]),
-            planName: "Pro"
-        )
-
-        let claudeFiveHourReset = now.addingTimeInterval(
-            TimeInterval(1 * 3_600 + 38 * 60 + 50)
-        )
-        let claudeFiveHourLimit = UsageLimit(
-            id: "claude-demo-five-hour",
-            label: "5-hour",
-            usedPercent: 42,
-            resetsAt: claudeFiveHourReset,
-            durationMinutes: 300,
-            displayMode: .remaining
-        )
-        let claudeWeeklyReset = now.addingTimeInterval(
-            TimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60)
-        )
-        let claudeWeeklyLimit = UsageLimit(
-            id: "claude-demo-weekly",
-            label: "Weekly",
-            usedPercent: 56,
-            resetsAt: claudeWeeklyReset,
-            durationMinutes: 10_080,
-            displayMode: .remaining
-        )
-        let claudeDemo = ProviderUsage(
-            provider: .claude,
-            limits: [claudeFiveHourLimit, claudeWeeklyLimit],
-            updatedAt: now,
-            sourceDescription: "Live Claude account usage",
-            planName: "Max 5×"
-        )
-
-        let cursorReset = now.addingTimeInterval(
-            TimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60)
-        )
-        let cursorLimit = UsageLimit(
-            id: "cursor-demo-included",
-            label: "Composer + Grok",
-            usedPercent: 14,
-            resetsAt: cursorReset,
-            displayMode: .remaining
-        )
-        let cursorDemo = ProviderUsage(
-            provider: .cursor,
-            limits: [cursorLimit],
-            updatedAt: now,
-            sourceDescription: "Live Cursor first-party pool"
-        )
-
-        codexAccounts = [.defaultAccount]
-        codexUsage = [CodexAccount.defaultAccount.id: codexDemo]
-        claudeAccounts = [.defaultAccount]
-        claudeUsage = [ClaudeAccount.defaultAccount.id: claudeDemo]
-        if multipleAccounts {
-            let second = CodexAccount(name: "Work")
-            codexAccounts[0].name = "Personal"
-            codexAccounts.append(second)
-            codexUsage[second.id] = ProviderUsage(
-                provider: .codex,
-                limits: [UsageLimit(id: "second-weekly", label: "Weekly", usedPercent: 63,
-                    resetsAt: now.addingTimeInterval(2 * 86_400), durationMinutes: 10_080,
-                    displayMode: .remaining)],
-                updatedAt: now, sourceDescription: "Live Codex status",
-                bankedResets: BankedResets(availableCount: 1, credits: [
-                    BankedReset(id: "demo-work-reset", expiration: .date(now.addingTimeInterval(7 * 86_400)))
-                ]), planName: "Business"
-            )
-            let claudeWork = ClaudeAccount(name: "Work")
-            claudeAccounts[0].name = "Personal"
-            claudeAccounts.append(claudeWork)
-            claudeUsage[claudeWork.id] = ProviderUsage(
-                provider: .claude,
-                limits: [UsageLimit(id: "claude-work-weekly", label: "Weekly", usedPercent: 18,
-                    resetsAt: now.addingTimeInterval(3 * 86_400), durationMinutes: 10_080,
-                    displayMode: .remaining)],
-                updatedAt: now, sourceDescription: "Live Claude account usage", planName: "Pro"
-            )
+    private nonisolated static func defaultFetch(_ account: ProviderAccount) async throws -> ProviderUsage {
+        switch account.provider {
+        case .codex:
+            try await CodexUsageReader.fetch(account: account)
+        case .claude:
+            try await ClaudeUsageReader.fetch(account: account)
+        case .antigravity:
+            try await AntigravityUsageReader.fetch(account: account)
+        case .cursor:
+            try await CursorUsageReader.fetch(account: account)
         }
-        cursorAccounts = [.defaultAccount]
-        cursorUsage = ["default": cursorDemo]
-        codexErrors = [:]
-        claudeErrors = [:]
-        cursorErrors = [:]
-        lastRefresh = now
     }
 
+    // MARK: - Entries & Menu Bar
+
     var entries: [UsageEntry] {
-        codexAccounts.map {
-            UsageEntry(provider: .codex, account: $0, usage: codexUsage[$0.id],
-                       error: codexErrors[$0.id] ?? (codexUsage[$0.id] == nil && $0.mode == .login ? "Sign in from Providers to load usage." : nil))
-        } + claudeAccounts.map {
-            UsageEntry(provider: .claude, claudeAccount: $0, usage: claudeUsage[$0.id],
-                       error: claudeErrors[$0.id] ?? (claudeUsage[$0.id] == nil && $0.mode == .login ? "Sign in from Providers to load usage." : nil))
-        } + cursorAccounts.map {
-            UsageEntry(provider: .cursor, cursorAccount: $0, usage: cursorUsage[$0.id],
-                       error: cursorErrors[$0.id] ?? (cursorUsage[$0.id] == nil && $0.mode == .login ? "Sign in from Providers to load usage." : nil))
+        let counts = Dictionary(grouping: accounts, by: \.provider).mapValues(\.count)
+        return UsageProvider.allCases.flatMap { provider in
+            accounts
+                .filter { $0.provider == provider }
+                .map { account in
+                    UsageEntry(
+                        account: account,
+                        usage: usageByID[account.id],
+                        error: errorsByID[account.id],
+                        hasMultipleProviderAccounts: (counts[provider] ?? 0) > 1
+                    )
+                }
         }
     }
 
@@ -218,12 +125,17 @@ final class UsageStore: ObservableObject {
         entries.filter { isVisible($0.id) }
     }
 
-    func isVisible(_ entryID: String) -> Bool { !hiddenEntryIDs.contains(entryID) }
+    func isVisible(_ entryID: String) -> Bool {
+        !hiddenEntryIDs.contains(entryID)
+    }
 
     func setVisible(_ visible: Bool, entryID: String) {
         guard entries.contains(where: { $0.id == entryID }) else { return }
-        if visible { hiddenEntryIDs.remove(entryID) }
-        else { hiddenEntryIDs.insert(entryID) }
+        if visible {
+            hiddenEntryIDs.remove(entryID)
+        } else {
+            hiddenEntryIDs.insert(entryID)
+        }
         preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
     }
 
@@ -232,7 +144,7 @@ final class UsageStore: ObservableObject {
     }
 
     /// Accounts of one provider share a single menu-bar logo followed by their
-    /// own meters, so additional logins do not repeat the icon.
+    /// own meters, so additional local profiles do not repeat the icon.
     var menuGroups: [(provider: UsageProvider, percents: [Int?])] {
         menuEntries.reduce(into: []) { groups, entry in
             if let last = groups.indices.last, groups[last].provider == entry.0 {
@@ -244,244 +156,337 @@ final class UsageStore: ObservableObject {
     }
 
     var menuSummary: String {
-        guard !visibleEntries.isEmpty else { return "Reset Meter. All meters hidden. Open Providers to show them." }
+        guard !visibleEntries.isEmpty else {
+            return "Reset Meter. All meters hidden. Open Providers to show them."
+        }
         return visibleEntries.map {
             "\($0.displayName) \($0.usage?.headlinePercent.map { "\($0)%" } ?? "unavailable") remaining"
         }.joined(separator: ", ")
     }
 
-    func addAccount(name: String, provider: UsageProvider = .codex, mode: ConnectionMode = .login) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, signingInAccountID == nil, !isRefreshing else { return }
-        switch provider {
-        case .codex:
-            let account = CodexAccount(name: trimmed, mode: mode)
-            codexAccounts.append(account)
-            saveAccounts()
-            if mode == .login { signIn(account) }
-        case .claude:
-            let account = ClaudeAccount(name: trimmed, mode: mode)
-            claudeAccounts.append(account)
-            saveAccounts()
-            if mode == .login { signIn(account) }
-        case .cursor:
-            let account = CursorAccount(name: trimmed, mode: mode)
-            cursorAccounts.append(account)
-            saveAccounts()
-            if mode == .login { signIn(account) }
-        }
-        if mode == .local { Task { await refresh() } }
+    // MARK: - Account Management & Local Discovery
+
+    func rescanLocalInstallations() {
+        guard !isRefreshing else { return }
+        let discovered = Self.sanitizedAccounts(discoverer())
+        accounts = Self.mergeAccounts(saved: accounts, discovered: discovered)
+        saveAccounts()
+        Task { await refresh() }
     }
 
-    func setMode(_ mode: ConnectionMode, entryID: String) {
-        guard !isRefreshing, signingInAccountID == nil else { return }
-        if let index = codexAccounts.firstIndex(where: { "codex:\($0.id)" == entryID }) {
-            guard codexAccounts[index].mode != mode else { return }
-            codexAccounts[index].mode = mode
-            codexUsage[codexAccounts[index].id] = nil
-            codexErrors[codexAccounts[index].id] = nil
-        } else if let index = claudeAccounts.firstIndex(where: { "claude:\($0.id)" == entryID }) {
-            guard claudeAccounts[index].mode != mode else { return }
-            claudeAccounts[index].mode = mode
-            claudeUsage[claudeAccounts[index].id] = nil
-            claudeErrors[claudeAccounts[index].id] = nil
-        } else if let index = cursorAccounts.firstIndex(where: { $0.entryID == entryID }) {
-            guard cursorAccounts[index].mode != mode else { return }
-            cursorAccounts[index].mode = mode
-            cursorUsage[cursorAccounts[index].id] = nil
-            cursorErrors[cursorAccounts[index].id] = nil
-        } else { return }
-        accountError = nil
+    func addLocalAccount(
+        name: String,
+        provider: UsageProvider,
+        profilePath: String,
+        secondaryPath: String? = nil
+    ) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPath = profilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, !trimmedPath.isEmpty, !isRefreshing else { return }
+        let account = ProviderAccount(
+            provider: provider,
+            name: trimmedName,
+            profilePath: trimmedPath,
+            secondaryPath: secondaryPath
+        )
+        guard account.isValid else { return }
+        accounts.append(account)
+        saveAccounts()
+        Task { await refresh() }
+    }
+
+    func renameAccount(_ account: ProviderAccount, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        accounts[index].name = trimmed
         saveAccounts()
     }
 
-    func renameAccount(_ account: CodexAccount, name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let index = codexAccounts.firstIndex(where: { $0.id == account.id }) else { return }
-        codexAccounts[index].name = trimmed
+    func removeAccount(_ account: ProviderAccount) {
+        guard !account.isDefault, !isRefreshing,
+              accounts.contains(where: { $0.id == account.id }) else { return }
+        accounts.removeAll { $0.id == account.id }
+        usageByID.removeValue(forKey: account.id)
+        errorsByID.removeValue(forKey: account.id)
+        hiddenEntryIDs.remove(account.id)
+        preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
         saveAccounts()
     }
 
-    func removeAccount(_ account: CodexAccount) {
-        guard !account.isDefault, !isRefreshing, signingInAccountID == nil,
-              codexAccounts.contains(where: { $0.id == account.id }) else { return }
-        do {
-            if let home = account.loginDirectory, FileManager.default.fileExists(atPath: home.path) {
-                try FileManager.default.removeItem(at: home)
-            }
-            codexAccounts.removeAll { $0.id == account.id }
-            codexUsage.removeValue(forKey: account.id)
-            codexErrors.removeValue(forKey: account.id)
-            hiddenEntryIDs.remove("codex:\(account.id)")
-            preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
-            saveAccounts()
-            accountError = nil
-        } catch {
-            accountError = "Could not remove this account's local login. Try again."
-        }
-    }
-
-    func renameAccount(_ account: ClaudeAccount, name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let index = claudeAccounts.firstIndex(where: { $0.id == account.id }) else { return }
-        claudeAccounts[index].name = trimmed
-        saveAccounts()
-    }
-
-    func removeAccount(_ account: ClaudeAccount) {
-        guard !account.isDefault, !isRefreshing, signingInAccountID == nil,
-              claudeAccounts.contains(where: { $0.id == account.id }) else { return }
-        do {
-            try claudeLoginRemover(account)
-            claudeAccounts.removeAll { $0.id == account.id }
-            claudeUsage.removeValue(forKey: account.id)
-            claudeErrors.removeValue(forKey: account.id)
-            hiddenEntryIDs.remove("claude:\(account.id)")
-            preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
-            saveAccounts()
-            accountError = nil
-        } catch {
-            accountError = "Could not remove this account's local login. Try again."
-        }
-    }
-
-    func signIn(_ account: CodexAccount) {
-        guard signingInAccountID == nil, !isRefreshing,
-              let account = codexAccounts.first(where: { $0.id == account.id }), account.mode == .login else { return }
-        codexUsage[account.id] = nil
-        codexErrors[account.id] = nil
-        let signer = codexSigner
-        startSignIn(entryID: "codex:\(account.id)") { try await signer(account) }
-    }
-
-    func signIn(_ account: ClaudeAccount) {
-        guard signingInAccountID == nil, !isRefreshing,
-              let account = claudeAccounts.first(where: { $0.id == account.id }), account.mode == .login else { return }
-        claudeUsage[account.id] = nil
-        claudeErrors[account.id] = nil
-        let signer = claudeSigner
-        startSignIn(entryID: "claude:\(account.id)") { try await signer(account) }
-    }
-
-    func renameAccount(_ account: CursorAccount, name: String) {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let index = cursorAccounts.firstIndex(where: { $0.id == account.id }) else { return }
-        cursorAccounts[index].name = trimmed
-        saveAccounts()
-    }
-
-    func removeAccount(_ account: CursorAccount) {
-        guard !account.isDefault, !isRefreshing, signingInAccountID == nil,
-              cursorAccounts.contains(where: { $0.id == account.id }) else { return }
-        do {
-            try cursorLoginRemover(account)
-            cursorAccounts.removeAll { $0.id == account.id }
-            cursorUsage[account.id] = nil
-            cursorErrors[account.id] = nil
-            hiddenEntryIDs.remove(account.entryID)
-            preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
-            saveAccounts()
-            accountError = nil
-        } catch {
-            accountError = "Could not remove this account's Reset Meter login. Try again."
-        }
-    }
-
-    func signIn(_ account: CursorAccount) {
-        guard signingInAccountID == nil, !isRefreshing,
-              let account = cursorAccounts.first(where: { $0.id == account.id }), account.mode == .login else { return }
-        cursorUsage[account.id] = nil
-        cursorErrors[account.id] = nil
-        let signer = cursorSigner
-        startSignIn(entryID: account.entryID) { try await signer(account) }
-    }
-
-    private func startSignIn(entryID: String, operation: @escaping @Sendable () async throws -> Void) {
-        signingInAccountID = entryID
-        accountError = nil
-        signInTask = Task { [weak self] in
-            do {
-                try await operation()
-                try Task.checkCancellation()
-                self?.signingInAccountID = nil
-                await self?.refresh()
-            } catch is CancellationError {
-                self?.signingInAccountID = nil
-            } catch {
-                self?.accountError = error.localizedDescription
-                self?.signingInAccountID = nil
-            }
-            self?.signInTask = nil
-        }
-    }
-
-    func cancelSignIn() { signInTask?.cancel() }
-
-    private func saveAccounts() {
-        if let data = try? JSONEncoder().encode(codexAccounts) {
-            preferences.set(data, forKey: Self.accountsKey)
-        }
-        if let data = try? JSONEncoder().encode(claudeAccounts) {
-            preferences.set(data, forKey: Self.claudeAccountsKey)
-        }
-        if let data = try? JSONEncoder().encode(cursorAccounts) {
-            preferences.set(data, forKey: Self.cursorAccountsKey)
-        }
-    }
+    // MARK: - Refresh
 
     func refresh() async {
-        guard !isRefreshing, signingInAccountID == nil else { return }
+        guard !isRefreshing else { return }
         isRefreshing = true
 
-        async let codexResults = Self.fetchAccounts(codexAccounts, using: codexFetcher)
-        async let claudeResults = Self.fetchAccounts(claudeAccounts, using: claudeFetcher)
-        async let cursorResults = Self.fetchAccounts(cursorAccounts, using: cursorFetcher)
+        let snapshot = accounts
+        let fetcher = self.fetcher
+        let results = await Self.fetchAll(snapshot, using: fetcher)
 
-        for (id, usage, error) in await codexResults {
-            guard codexAccounts.contains(where: { $0.id == id }) else { continue }
-            codexUsage[id] = usage
-            codexErrors[id] = error
-        }
-        for (id, usage, error) in await claudeResults {
-            guard claudeAccounts.contains(where: { $0.id == id }) else { continue }
-            claudeUsage[id] = usage
-            claudeErrors[id] = error
-        }
-
-        for (id, usage, error) in await cursorResults {
-            guard cursorAccounts.contains(where: { $0.id == id }) else { continue }
-            cursorUsage[id] = usage
-            cursorErrors[id] = error
+        for (id, usage, error) in results {
+            guard accounts.contains(where: { $0.id == id }) else { continue }
+            usageByID[id] = usage
+            errorsByID[id] = error
         }
 
         lastRefresh = Date()
         isRefreshing = false
     }
 
-    private nonisolated static func fetchAccounts<Account: UsageAccount>(
-        _ accounts: [Account], using fetcher: @escaping @Sendable (Account) async throws -> ProviderUsage
+    private nonisolated static func fetchAll(
+        _ accounts: [ProviderAccount],
+        using fetcher: @escaping @Sendable (ProviderAccount) async throws -> ProviderUsage
     ) async -> [(String, ProviderUsage?, String?)] {
-        await withTaskGroup(of: (String, ProviderUsage?, String?).self) { group in
-            // All Local cards of a provider share one account. Fetch it once so
-            // simultaneous token renewals cannot race against each other.
-            let local = accounts.first(where: { $0.mode == .local })
-            for account in accounts where account.mode == .login || account.id == local?.id {
-                group.addTask {
-                    do { return (account.id, try await fetcher(account), nil) }
-                    catch { return (account.id, nil, error.localizedDescription) }
-                }
+        struct DedupeKey: Hashable {
+            let provider: UsageProvider
+            let source: String
+        }
+
+        var primaryBySource: [DedupeKey: ProviderAccount] = [:]
+        var duplicatesByPrimaryID: [String: [String]] = [:]
+        for account in accounts {
+            let key = DedupeKey(provider: account.provider, source: account.displaySourcePath())
+            if let existing = primaryBySource[key] {
+                duplicatesByPrimaryID[existing.id, default: []].append(account.id)
+            } else {
+                primaryBySource[key] = account
             }
-            var results: [(String, ProviderUsage?, String?)] = []
-            for await result in group {
-                results.append(result)
-                if result.0 == local?.id {
-                    for account in accounts where account.mode == .local && account.id != result.0 {
-                        results.append((account.id, result.1, result.2))
+        }
+
+        let uniqueAccounts = Array(primaryBySource.values)
+        return await withTaskGroup(of: (String, ProviderUsage?, String?).self) { group in
+            for account in uniqueAccounts {
+                group.addTask {
+                    do {
+                        return (account.id, try await fetcher(account), nil)
+                    } catch {
+                        return (account.id, nil, error.localizedDescription)
                     }
                 }
             }
-            return results
+
+            var output: [(String, ProviderUsage?, String?)] = []
+            for await result in group {
+                output.append(result)
+                for duplicateID in duplicatesByPrimaryID[result.0] ?? [] {
+                    output.append((duplicateID, result.1, result.2))
+                }
+            }
+            return output
         }
     }
 
+    // MARK: - Demo Fixtures
+
+    func loadDemoData(now: Date = .now, multipleAccounts: Bool = false) {
+        hiddenEntryIDs = []
+
+        let codexDefault = ProviderAccount(id: "codex:default", provider: .codex, name: multipleAccounts ? "Personal" : "Default")
+        let claudeDefault = ProviderAccount(id: "claude:default", provider: .claude, name: multipleAccounts ? "Personal" : "Default")
+        let antigravityDefault = ProviderAccount(id: "antigravity:default", provider: .antigravity, name: "Default")
+        let cursorDefault = ProviderAccount(id: "cursor:default", provider: .cursor, name: "Default")
+
+        var demoAccounts = [codexDefault, claudeDefault, antigravityDefault, cursorDefault]
+        var demoUsage: [String: ProviderUsage] = [:]
+
+        demoUsage[codexDefault.id] = ProviderUsage(
+            provider: .codex,
+            limits: [
+                UsageLimit(
+                    id: "codex-demo-weekly",
+                    label: "Weekly",
+                    usedPercent: 19,
+                    resetsAt: now.addingTimeInterval(TimeInterval(6 * 86_400 + 16 * 3_600 + 59 * 60)),
+                    durationMinutes: 10_080,
+                    displayMode: .remaining
+                )
+            ],
+            updatedAt: now,
+            sourceDescription: "Live local ChatGPT / Codex status",
+            bankedResets: BankedResets(availableCount: 2, credits: [
+                BankedReset(id: "demo-reset-1", expiration: .date(now.addingTimeInterval(TimeInterval(2 * 86_400)))),
+                BankedReset(id: "demo-reset-2", expiration: .date(now.addingTimeInterval(TimeInterval(14 * 86_400)))),
+            ]),
+            planName: "Pro"
+        )
+
+        demoUsage[claudeDefault.id] = ProviderUsage(
+            provider: .claude,
+            limits: [
+                UsageLimit(
+                    id: "claude-demo-five-hour",
+                    label: "5-hour",
+                    usedPercent: 42,
+                    resetsAt: now.addingTimeInterval(TimeInterval(1 * 3_600 + 38 * 60 + 50)),
+                    durationMinutes: 300,
+                    displayMode: .remaining
+                ),
+                UsageLimit(
+                    id: "claude-demo-weekly",
+                    label: "Weekly",
+                    usedPercent: 56,
+                    resetsAt: now.addingTimeInterval(TimeInterval(5 * 86_400 + 17 * 3_600 + 59 * 60)),
+                    durationMinutes: 10_080,
+                    displayMode: .remaining
+                ),
+            ],
+            updatedAt: now,
+            sourceDescription: "Live local Claude usage",
+            planName: "Max 20×"
+        )
+
+        demoUsage[antigravityDefault.id] = ProviderUsage(
+            provider: .antigravity,
+            limits: [
+                UsageLimit(
+                    id: "antigravity-demo-gemini",
+                    label: "Gemini",
+                    usedPercent: 12,
+                    resetsAt: now.addingTimeInterval(TimeInterval(3 * 3_600 + 48 * 60)),
+                    durationMinutes: 300,
+                    displayMode: .remaining
+                ),
+                UsageLimit(
+                    id: "antigravity-demo-claude",
+                    label: "Claude & GPT",
+                    usedPercent: 24,
+                    resetsAt: now.addingTimeInterval(TimeInterval(4 * 3_600 + 12 * 60)),
+                    durationMinutes: 300,
+                    displayMode: .remaining
+                ),
+            ],
+            updatedAt: now,
+            sourceDescription: "Live local Antigravity status",
+            planName: "Google AI Ultra",
+            footnote: "2,400 AI credits available"
+        )
+
+        demoUsage[cursorDefault.id] = ProviderUsage(
+            provider: .cursor,
+            limits: [
+                UsageLimit(
+                    id: "cursor-demo-included",
+                    label: "Composer + Grok",
+                    usedPercent: 14,
+                    resetsAt: now.addingTimeInterval(TimeInterval(14 * 86_400 + 12 * 3_600 + 59 * 60)),
+                    displayMode: .remaining
+                )
+            ],
+            updatedAt: now,
+            sourceDescription: "Live local Cursor pool",
+            planName: "Pro"
+        )
+
+        if multipleAccounts {
+            let codexWork = ProviderAccount(id: "codex:work", provider: .codex, name: "Work", profilePath: "/Users/demo/.codex-work")
+            let claudeWork = ProviderAccount(
+                id: "claude:work",
+                provider: .claude,
+                name: "Work",
+                profilePath: "/Users/demo/Library/Application Support/Claude-Work",
+                secondaryPath: "/Users/demo/.claude-work"
+            )
+            demoAccounts.insert(codexWork, at: 1)
+            demoAccounts.insert(claudeWork, at: 3)
+
+            demoUsage[codexWork.id] = ProviderUsage(
+                provider: .codex,
+                limits: [
+                    UsageLimit(
+                        id: "codex-work-weekly",
+                        label: "Weekly",
+                        usedPercent: 29,
+                        resetsAt: now.addingTimeInterval(TimeInterval(2 * 86_400)),
+                        durationMinutes: 10_080,
+                        displayMode: .remaining
+                    )
+                ],
+                updatedAt: now,
+                sourceDescription: "Live local ChatGPT / Codex status",
+                bankedResets: BankedResets(availableCount: 1, credits: [
+                    BankedReset(id: "demo-work-reset", expiration: .date(now.addingTimeInterval(TimeInterval(7 * 86_400))))
+                ]),
+                planName: "Business Pro Lite"
+            )
+
+            demoUsage[claudeWork.id] = ProviderUsage(
+                provider: .claude,
+                limits: [
+                    UsageLimit(
+                        id: "claude-work-weekly",
+                        label: "Weekly",
+                        usedPercent: 18,
+                        resetsAt: now.addingTimeInterval(TimeInterval(3 * 86_400)),
+                        durationMinutes: 10_080,
+                        displayMode: .remaining
+                    )
+                ],
+                updatedAt: now,
+                sourceDescription: "Live local Claude usage",
+                planName: "Team"
+            )
+        }
+
+        accounts = demoAccounts
+        usageByID = demoUsage
+        errorsByID = [:]
+        lastRefresh = now
+    }
+
+    // MARK: - Persistence & Merging
+
+    private func saveAccounts() {
+        if let data = try? JSONEncoder().encode(accounts) {
+            preferences.set(data, forKey: Self.accountsKey)
+        }
+    }
+
+    private static func sanitizedAccounts(_ list: [ProviderAccount]) -> [ProviderAccount] {
+        var seen = Set<String>()
+        return list.filter { $0.isValid && seen.insert($0.id).inserted }
+    }
+
+    private static func mergeAccounts(
+        saved: [ProviderAccount],
+        discovered: [ProviderAccount]
+    ) -> [ProviderAccount] {
+        let fallbackDefaults = UsageProvider.allCases.map { ProviderAccount.defaultAccount(for: $0) }
+        let baselineDiscovered = discovered.isEmpty ? fallbackDefaults : discovered
+
+        guard !saved.isEmpty else {
+            return baselineDiscovered
+        }
+
+        var merged = saved
+        let discoveredCounts = Dictionary(grouping: baselineDiscovered, by: \.provider).mapValues(\.count)
+
+        for item in baselineDiscovered {
+            if let existingIndex = merged.firstIndex(where: { $0.id == item.id }) {
+                // Backfill newly discovered paired paths without overwriting user's custom name.
+                if merged[existingIndex].profilePath == nil {
+                    merged[existingIndex].profilePath = item.profilePath
+                }
+                if merged[existingIndex].secondaryPath == nil {
+                    merged[existingIndex].secondaryPath = item.secondaryPath
+                }
+                // Upgrade untouched "Default" label to "Personal" when a second profile is discovered.
+                if (discoveredCounts[item.provider] ?? 0) > 1,
+                   merged[existingIndex].name == "Default",
+                   item.name == "Personal" {
+                    merged[existingIndex].name = "Personal"
+                }
+            } else if !merged.contains(where: {
+                $0.provider == item.provider && $0.profilePath != nil && $0.profilePath == item.profilePath
+            }) {
+                merged.append(item)
+            }
+        }
+
+        // Ensure every provider retains at least its default entry.
+        for provider in UsageProvider.allCases where !merged.contains(where: { $0.provider == provider }) {
+            merged.append(.defaultAccount(for: provider))
+        }
+        return merged
+    }
 }

@@ -1,12 +1,12 @@
 import Foundation
 
-public enum ResetExpiration: Equatable, Sendable {
+public enum ResetExpiration: Codable, Equatable, Sendable {
     case date(Date)
     case never
     case unknown
 }
 
-public struct BankedReset: Identifiable, Equatable, Sendable {
+public struct BankedReset: Identifiable, Codable, Equatable, Sendable {
     public let id: String
     public let expiration: ResetExpiration
 
@@ -16,7 +16,7 @@ public struct BankedReset: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct BankedResets: Equatable, Sendable {
+public struct BankedResets: Codable, Equatable, Sendable {
     /// The backend count is authoritative: the detail list may be capped.
     public let availableCount: Int
     public let credits: [BankedReset]?

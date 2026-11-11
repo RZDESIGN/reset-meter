@@ -9,11 +9,13 @@ enum AccountWindow {
     static func show(store: UsageStore) {
         if window == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 520, height: 720),
-                styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 740),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
             )
-            window.title = "Providers & Accounts"
-            window.contentMinSize = NSSize(width: 500, height: 560)
+            window.title = "Providers & Local Accounts"
+            window.contentMinSize = NSSize(width: 520, height: 580)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: AccountSettings(store: store))
             window.center()
@@ -26,49 +28,55 @@ enum AccountWindow {
 
 struct AccountSettings: View {
     @ObservedObject var store: UsageStore
-    @State private var newName = ""
-    @State private var newAccountProvider: UsageProvider = .codex
-    @State private var newMode: ConnectionMode = .login
     @State var selectedProvider: UsageProvider? = nil
+    @State private var newName = ""
+    @State private var newProvider: UsageProvider = .codex
+    @State private var newProfilePath = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Providers & accounts")
-                    .font(.title2.bold())
-                Spacer()
-                if store.isRefreshing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Button {
-                        Task { await store.refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .help("Refresh usage")
-                    .disabled(store.signingInAccountID != nil)
-                }
-            }
-            Text("Show or hide each meter in the menu bar and popover. Hidden meters stay here with their usage details.")
+        VStack(alignment: .leading, spacing: 14) {
+            headerBar
+
+            Text("Reset Meter reads your installed AI clients locally in read-only mode — no extra sign-ins or Keychain prompts.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                Text("Menu bar")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Picker("Menu bar style", selection: $store.menuBarStyle) {
+                    ForEach(MenuBarStyle.allCases, id: \.self) { style in
+                        Text(style.label).tag(style)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 240)
+                Spacer()
+            }
+
             Picker("Provider", selection: $selectedProvider) {
                 Text("All").tag(nil as UsageProvider?)
-                Text("Codex").tag(UsageProvider.codex as UsageProvider?)
-                Text("Claude").tag(UsageProvider.claude as UsageProvider?)
-                Text("Cursor").tag(UsageProvider.cursor as UsageProvider?)
+                ForEach(UsageProvider.allCases, id: \.self) { provider in
+                    Text(provider.displayName).tag(provider as UsageProvider?)
+                }
             }
+            .labelsHidden()
             .pickerStyle(.segmented)
+
             ScrollView {
-                VStack(spacing: 12) {
-                    ForEach(store.entries.filter { selectedProvider == nil || $0.provider == selectedProvider }) { entry in
+                VStack(spacing: 10) {
+                    ForEach(filteredEntries) { entry in
                         ProviderCard(
                             entry: entry,
                             visibility: Binding(
                                 get: { store.isVisible(entry.id) },
                                 set: { store.setVisible($0, entryID: entry.id) }
                             ),
-                            showsAccountName: false
+                            showsAccountSubtitle: false
                         ) {
                             AccountControls(store: store, entry: entry)
                         }
@@ -77,65 +85,130 @@ struct AccountSettings: View {
                 .padding(2)
             }
             .scrollBounceBehavior(.basedOnSize)
+
             Divider()
-            Text("Add \(addingProvider.displayName) account").font(.headline)
-            HStack {
-                if selectedProvider == nil {
-                    Picker("Account provider", selection: $newAccountProvider) {
-                        Text("Codex").tag(UsageProvider.codex)
-                        Text("Claude").tag(UsageProvider.claude)
-                        Text("Cursor").tag(UsageProvider.cursor)
-                    }
-                    .labelsHidden()
-                    .frame(width: 100)
-                    .disabled(busy)
-                }
-                Picker("Connection", selection: $newMode) {
-                    ForEach(ConnectionMode.allCases, id: \.self) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(busy)
-            }
-            HStack {
-                TextField("Account name, e.g. Work", text: $newName)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { addAccount() }
-                Button(newMode == .login ? "Add & Sign In" : "Add Local") { addAccount() }
-                    .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
-            }
-            Text(newMode == .login
-                 ? "Sign in in your browser. Each Login connection stays separate from your installed app and other accounts."
-                 : "Uses the account already signed in on this Mac. Local connections to the same provider share that account.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if store.signingInAccountID != nil {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("Complete sign-in in your browser…").font(.caption)
-                    Spacer()
-                    Button("Cancel") { store.cancelSignIn() }
-                }
-            }
-            if let error = store.accountError {
-                Text(error).font(.caption).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+
+            customProfileSection
         }
         .padding(20)
-        .frame(minWidth: 500, idealWidth: 520, maxWidth: .infinity,
-               minHeight: 560, idealHeight: 720, maxHeight: .infinity)
+        .frame(
+            minWidth: 520, idealWidth: 560, maxWidth: .infinity,
+            minHeight: 580, idealHeight: 740, maxHeight: .infinity
+        )
     }
 
-    private var busy: Bool { store.isRefreshing || store.signingInAccountID != nil }
-    private var addingProvider: UsageProvider { selectedProvider ?? newAccountProvider }
+    private var filteredEntries: [UsageEntry] {
+        store.entries.filter { selectedProvider == nil || $0.provider == selectedProvider }
+    }
 
-    private func addAccount() {
-        guard !busy, !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        store.addAccount(name: newName, provider: addingProvider, mode: newMode)
+    private var addingProvider: UsageProvider {
+        selectedProvider ?? newProvider
+    }
+
+    private var headerBar: some View {
+        HStack(spacing: 8) {
+            Text("Providers & local accounts")
+                .font(.title2.bold())
+            Spacer()
+            Button {
+                store.rescanLocalInstallations()
+            } label: {
+                Label("Scan Local Apps", systemImage: "sparkle.magnifyingglass")
+                    .font(.caption.weight(.medium))
+            }
+            .controlSize(.small)
+            .disabled(store.isRefreshing)
+            .help("Detect separate local Claude, ChatGPT / Codex, Antigravity, and Cursor installations")
+
+            if store.isRefreshing {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 24, height: 24)
+            } else {
+                Button {
+                    Task { await store.refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .help("Refresh usage")
+            }
+        }
+    }
+
+    private var customProfileSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Add custom local profile")
+                .font(.subheadline.weight(.semibold))
+
+            HStack(spacing: 8) {
+                if selectedProvider == nil {
+                    Picker("Provider", selection: $newProvider) {
+                        ForEach(UsageProvider.allCases, id: \.self) { provider in
+                            Text(provider.displayName).tag(provider)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 120)
+                    .disabled(store.isRefreshing)
+                }
+
+                TextField("Label (e.g. Work)", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+
+                TextField("Folder path", text: $newProfilePath)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addCustomAccount() }
+
+                Button("Browse…") {
+                    chooseFolder()
+                }
+                .disabled(store.isRefreshing)
+
+                Button("Add") {
+                    addCustomAccount()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canAddCustomAccount || store.isRefreshing)
+            }
+
+            Text(addingProvider.localSourceHint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var canAddCustomAccount: Bool {
+        !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !newProfilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func addCustomAccount() {
+        guard canAddCustomAccount else { return }
+        store.addLocalAccount(
+            name: newName,
+            provider: addingProvider,
+            profilePath: newProfilePath
+        )
         newName = ""
+        newProfilePath = ""
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.prompt = "Select Profile"
+        panel.message = "Choose the local profile folder for \(addingProvider.displayName)"
+        if panel.runModal() == .OK, let url = panel.url {
+            newProfilePath = url.path
+            if newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                newName = url.lastPathComponent.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            }
+        }
     }
 }
 
@@ -147,75 +220,52 @@ private struct AccountControls: View {
     init(store: UsageStore, entry: UsageEntry) {
         self.store = store
         self.entry = entry
-        _name = State(initialValue: entry.accountName ?? "Default")
+        _name = State(initialValue: entry.accountName)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("Connection", selection: Binding(
-                get: { entry.mode },
-                set: { mode in
-                    store.setMode(mode, entryID: entry.id)
-                    Task { await store.refresh() }
-                }
-            )) {
-                ForEach(ConnectionMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .disabled(busy)
-            .accessibilityLabel("\(entry.provider.displayName) \(name) connection mode")
-            HStack {
-                TextField("Account name", text: $name)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Account label", text: $name)
                     .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
                     .onChange(of: name) { _, value in
-                        if let account = entry.account { store.renameAccount(account, name: value) }
-                        if let account = entry.claudeAccount { store.renameAccount(account, name: value) }
-                        if let account = entry.cursorAccount { store.renameAccount(account, name: value) }
+                        store.renameAccount(entry.account, name: value)
                     }
-                if entry.mode == .login {
-                    Button("Sign In") {
-                        if let account = entry.account { store.signIn(account) }
-                        if let account = entry.claudeAccount { store.signIn(account) }
-                        if let account = entry.cursorAccount { store.signIn(account) }
+
+                Button {
+                    let target = entry.account.revealDirectoryURL()
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: target.path)
                     }
-                    .disabled(busy)
+                } label: {
+                    Image(systemName: "folder")
                 }
-                if !isDefault {
+                .controlSize(.small)
+                .help("Open local profile folder in Finder")
+
+                if !entry.account.isDefault {
                     Button(role: .destructive) {
-                        if let account = entry.account { store.removeAccount(account) }
-                        if let account = entry.claudeAccount { store.removeAccount(account) }
-                        if let account = entry.cursorAccount { store.removeAccount(account) }
-                    } label: { Image(systemName: "trash") }
-                    .disabled(busy)
-                    .help("Remove this account and its saved Reset Meter login")
-                    .accessibilityLabel("Remove \(entry.provider.displayName) \(name)")
+                        store.removeAccount(entry.account)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .controlSize(.small)
+                    .disabled(store.isRefreshing)
+                    .help("Remove this profile card from Reset Meter (does not touch your local client data)")
+                    .accessibilityLabel("Remove \(entry.displayName)")
                 }
             }
-            Text(connectionDescription)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 5) {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 10))
+                Text(entry.account.displaySourcePath())
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(.tertiary)
         }
     }
-
-    private var isDefault: Bool {
-        entry.account?.isDefault ?? entry.claudeAccount?.isDefault ?? entry.cursorAccount?.isDefault ?? true
-    }
-
-    private var connectionDescription: String {
-        if entry.mode == .login {
-            return entry.provider == .claude
-                ? "Separate browser login for live account usage and reset times. Uses the sign-in helper built into the Claude app."
-                : "Separate browser login saved for this Reset Meter account."
-        }
-        switch entry.provider {
-        case .codex: return "Uses the current Codex app or CLI login on this Mac."
-        case .claude: return "Reads the Claude app’s usage cache, which has no reset times, or a current Claude Code login. Never changes either."
-        case .cursor: return "Uses the current Cursor app login on this Mac."
-        }
-    }
-
-    private var busy: Bool { store.isRefreshing || store.signingInAccountID != nil }
 }

@@ -1,86 +1,126 @@
 import Foundation
 
+/// Purely local, read-only Claude usage reader supporting multiple separate Claude installations/profiles:
+/// 1. Active Claude Desktop Code/Cowork session token for this exact profile (live usage + exact reset dates).
+/// 2. Standalone local Claude Code credentials for this profile's config directory (read-only; never renews/rotates).
+/// 3. Claude Desktop's local `plan-usage-history.json` paired with `.claude.json` plan metadata.
 public enum ClaudeUsageReader {
-    public static func signIn(account: ClaudeAccount) async throws {
-        guard let home = account.homeDirectory else { throw UsageReadError.claudeLoginFailed }
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true,
-                                               attributes: [.posixPermissions: 0o700])
-        try await ClaudeCommand.execute(account: account)
-    }
-
-    public static func removeLogin(account: ClaudeAccount) throws {
-        try ClaudeCredentials.remove(account: account)
-    }
-
-    public static func fetch(account: ClaudeAccount = .defaultAccount) async throws -> ProviderUsage {
-        try await fetchLocalOrLogin(account: account, live: {
-            try await fetchLive(account: account)
-        }, desktop: {
-            try await Task.detached(priority: .utility) { try ClaudeDesktopUsageReader.fetch() }.value
-        })
-    }
-
-    static func fetchLocalOrLogin(
-        account: ClaudeAccount,
-        live: @Sendable () async throws -> ProviderUsage,
-        desktop: @Sendable () async throws -> ProviderUsage
+    public static func fetch(
+        account: ProviderAccount = .defaultAccount(for: .claude),
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        cacheDirectory: URL = UsageSnapshotCache.defaultDirectory
     ) async throws -> ProviderUsage {
-        guard account.isValid else { throw UsageReadError.claudeSignedOut }
-        do { return try await live() }
-        catch {
-            try Task.checkCancellation()
-            guard account.mode == .local else { throw error }
-            if let cached = try? await desktop() {
-                try Task.checkCancellation()
-                return cached
+        guard account.isValid, account.provider == .claude else {
+            throw UsageReadError.claudeLocalUnavailable
+        }
+        let metadata = await Task.detached(priority: .utility) {
+            ClaudeLocalMetadata.read(account: account, home: home)
+        }.value
+        let previousSnapshot = UsageSnapshotCache.load(accountID: account.id, directory: cacheDirectory)
+
+        return try await fetchLocalLayers(
+            account: account,
+            activeSession: {
+                let active = await Task.detached(priority: .utility) {
+                    ClaudeCredentials.readActiveDesktopSession(account: account, metadata: metadata, home: home)
+                }.value
+                guard let active else { throw UsageReadError.claudeLocalUnavailable }
+                return try await fetchWithCredentials(active, fallbackPlan: metadata.planName)
+            },
+            storedCredentials: {
+                let stored = try await Task.detached(priority: .utility) {
+                    try ClaudeCredentials.readStored(account: account, home: home)
+                }.value
+                guard !stored.isExpired(now: Date()) else {
+                    throw UsageReadError.claudeAuthorizationFailed
+                }
+                return try await fetchWithCredentials(stored, fallbackPlan: metadata.planName)
+            },
+            desktopCache: {
+                try await Task.detached(priority: .utility) {
+                    try ClaudeDesktopUsageReader.fetch(
+                        account: account,
+                        metadata: metadata,
+                        previousSnapshot: previousSnapshot,
+                        home: home
+                    )
+                }.value
+            },
+            onLiveSuccess: { liveUsage in
+                UsageSnapshotCache.save(liveUsage, accountID: account.id, directory: cacheDirectory)
             }
-            // Neither a current installed login nor the Claude app's cache is available.
-            switch error as? UsageReadError {
-            case .claudeSignedOut?, .claudeAuthorizationFailed?, .claudeCredentialsUnavailable?:
-                throw UsageReadError.claudeLocalUnavailable
-            default: throw error
+        )
+    }
+
+    static func fetchLocalLayers(
+        account: ProviderAccount,
+        activeSession: @Sendable () async throws -> ProviderUsage,
+        storedCredentials: @Sendable () async throws -> ProviderUsage,
+        desktopCache: @Sendable () async throws -> ProviderUsage,
+        onLiveSuccess: @Sendable (ProviderUsage) -> Void = { _ in }
+    ) async throws -> ProviderUsage {
+        guard account.isValid else { throw UsageReadError.claudeLocalUnavailable }
+
+        var rateLimited = false
+        func tryLive(_ source: () async throws -> ProviderUsage) async throws -> ProviderUsage? {
+            do {
+                let usage = try await source()
+                try Task.checkCancellation()
+                onLiveSuccess(usage)
+                return usage
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch UsageReadError.claudeRateLimited {
+                rateLimited = true
+                return nil
+            } catch {
+                return nil
             }
         }
+
+        if let usage = try await tryLive(activeSession) {
+            return usage
+        }
+        if let usage = try await tryLive(storedCredentials) {
+            return usage
+        }
+
+        if let cached = try? await desktopCache() {
+            try Task.checkCancellation()
+            return cached
+        }
+
+        if rateLimited {
+            throw UsageReadError.claudeRateLimited
+        }
+        throw UsageReadError.claudeLocalUnavailable
     }
 
-    private static func fetchLive(account: ClaudeAccount) async throws -> ProviderUsage {
-        try await fetch(account: account, loadCredentials: { account in
-            try await Task.detached(priority: .utility) { try ClaudeCredentials.read(account: account) }.value
-        }, refreshCredentials: { account, credentials in
-            try await ClaudeCommand.renew(account: account, replacing: credentials)
-        }, request: { request in
-            let (data, response) = try await session.data(for: request)
-            guard let response = response as? HTTPURLResponse else { throw UsageReadError.malformedClaudeResponse }
-            return (data, response)
-        })
+    private static func fetchWithCredentials(
+        _ credentials: ClaudeCredentials,
+        fallbackPlan: String?
+    ) async throws -> ProviderUsage {
+        try await fetch(
+            credentials: credentials,
+            fallbackPlan: fallbackPlan,
+            request: { request in
+                let (data, response) = try await session.data(for: request)
+                guard let response = response as? HTTPURLResponse else {
+                    throw UsageReadError.malformedClaudeResponse
+                }
+                return (data, response)
+            }
+        )
     }
 
     static func fetch(
-        account: ClaudeAccount,
-        loadCredentials: @Sendable (ClaudeAccount) async throws -> ClaudeCredentials,
-        refreshCredentials: @Sendable (ClaudeAccount, ClaudeCredentials) async throws -> Void,
+        credentials: ClaudeCredentials,
+        fallbackPlan: String? = nil,
         request: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     ) async throws -> ProviderUsage {
-        var credentials = try await loadCredentials(account)
-        // Local only reads the installed login. Claude keeps it current while in
-        // use; renewing it here would rotate the refresh token Claude relies on.
-        let renewable = account.mode == .login
-        var refreshed = false
-        if credentials.needsRefresh(now: Date()) {
-            guard renewable else { throw UsageReadError.claudeAuthorizationFailed }
-            try await refreshCredentials(account, credentials)
-            credentials = try await loadCredentials(account)
-            refreshed = true
-        }
-        var (data, response) = try await request(usageRequest(token: credentials.accessToken))
-        if response.statusCode == 401 && renewable && !refreshed {
-            try await refreshCredentials(account, credentials)
-            credentials = try await loadCredentials(account)
-            (data, response) = try await request(usageRequest(token: credentials.accessToken))
-        }
+        let (data, response) = try await request(usageRequest(token: credentials.accessToken))
         try validate(response)
-        var plan = credentials.planName
-        // Refresh plan metadata after upgrades. A profile failure must not discard valid usage.
+        var plan = credentials.planName ?? fallbackPlan
         if let (profile, profileResponse) = try? await request(authenticatedRequest(path: "profile", token: credentials.accessToken)),
            profileResponse.statusCode == 200 {
             plan = parsePlan(profile) ?? plan
@@ -122,25 +162,59 @@ public enum ClaudeUsageReader {
             ("seven_day_opus", "Weekly · Opus", 10_080),
             ("seven_day_sonnet", "Weekly · Sonnet", 10_080),
             ("seven_day_oauth_apps", "Weekly · OAuth apps", 10_080),
+            ("seven_day_cowork", "Weekly · Cowork", 10_080),
         ]
-        let limits = windows.compactMap { key, label, duration -> UsageLimit? in
+        var limits = windows.compactMap { key, label, duration -> UsageLimit? in
             guard let window = root[key] as? [String: Any],
                   let number = window["utilization"] as? NSNumber,
                   CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else { return nil }
-            return UsageLimit(id: "claude-\(key)", label: label, usedPercent: number.doubleValue,
-                              resetsAt: parseDate(window["resets_at"] as? String),
-                              durationMinutes: duration, displayMode: .remaining)
+            return UsageLimit(
+                id: "claude-\(key)",
+                label: label,
+                usedPercent: number.doubleValue,
+                resetsAt: parseDate(window["resets_at"] as? String),
+                durationMinutes: duration,
+                displayMode: .remaining
+            )
         }
+
+        // Fallback to active entries in modern `limits[]` array if legacy top-level windows were omitted.
+        if limits.isEmpty, let array = root["limits"] as? [[String: Any]] {
+            limits = array.enumerated().compactMap { index, item -> UsageLimit? in
+                if let active = item["is_active"] as? Bool, !active { return nil }
+                guard let number = item["percent"] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else { return nil }
+                let group = (item["group"] as? String)?.lowercased()
+                let label = group == "weekly" ? "Weekly" : (group == "five_hour" ? "5-hour" : "Usage window")
+                let duration: Int? = group == "weekly" ? 10_080 : (group == "five_hour" ? 300 : nil)
+                return UsageLimit(
+                    id: "claude-limit-\(index)",
+                    label: label,
+                    usedPercent: number.doubleValue,
+                    resetsAt: parseDate(item["resets_at"] as? String),
+                    durationMinutes: duration,
+                    displayMode: .remaining
+                )
+            }
+        }
+
         guard !limits.isEmpty else { throw UsageReadError.malformedClaudeResponse }
-        return ProviderUsage(provider: .claude, limits: limits, updatedAt: now,
-                             sourceDescription: "Live Claude account usage", planName: planName)
+        return ProviderUsage(
+            provider: .claude,
+            limits: limits,
+            updatedAt: now,
+            sourceDescription: "Live local Claude usage",
+            planName: planName
+        )
     }
 
     static func parsePlan(_ data: Data) -> String? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let organization = root["organization"] as? [String: Any] else { return nil }
-        return AccountPlan.claude(organization["organization_type"] as? String,
-                                  rateLimitTier: organization["rate_limit_tier"] as? String)
+        return AccountPlan.claude(
+            organization["organization_type"] as? String,
+            rateLimitTier: organization["rate_limit_tier"] as? String
+        )
     }
 
     private static func parseDate(_ value: String?) -> Date? {
@@ -156,8 +230,13 @@ public enum ClaudeUsageReader {
 }
 
 private final class NoRedirects: NSObject, URLSessionTaskDelegate {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
         completionHandler(nil)
     }
 }
