@@ -2,17 +2,32 @@ import Foundation
 import Testing
 @testable import UsageMeterCore
 
-@Test func cursorFirstPartyUsageDisplaysRemainingPercentResetAndPlan() throws {
-    let data = #"{"billingCycleStart":"1785235728000","billingCycleEnd":"1787914128000","planUsage":{"autoPercentUsed":14.007142857142856,"apiPercentUsed":100}}"#.data(using: .utf8)!
+@Test func cursorUsageDisplaysFirstPartyAndOtherModelsPoolsWithResetAndPlan() throws {
+    let data = #"{"billingCycleStart":"1785235728000","billingCycleEnd":"1787914128000","planUsage":{"autoPercentUsed":14.007142857142856,"apiPercentUsed":35.2}}"#.data(using: .utf8)!
     let now = Date(timeIntervalSince1970: 1_785_500_000)
 
     let usage = try CursorUsageReader.parse(data: data, now: now, planName: AccountPlan.cursor("pro"))
 
     #expect(usage.provider == .cursor)
-    #expect(usage.headlinePercent == 86)
     #expect(usage.planName == "Pro")
-    #expect(usage.limits.first?.label == "Composer + Grok")
-    #expect(usage.limits.first?.resetsAt == Date(timeIntervalSince1970: 1_787_914_128))
+    #expect(usage.limits.map(\.label) == ["Composer + Grok", "Other models"])
+    #expect(usage.limits.map { Int($0.displayPercent.rounded()) } == [86, 65])
+    #expect(usage.headlinePercent == 65)
+    #expect(usage.limits.allSatisfy { $0.resetsAt == Date(timeIntervalSince1970: 1_787_914_128) })
+
+    // Exhausted Other models pool (100% used -> 0% remaining) surfaces alongside remaining Composer + Grok capacity.
+    let exhaustedOtherData = #"{"billingCycleStart":"1785235728000","billingCycleEnd":"1787914128000","planUsage":{"autoPercentUsed":14.007142857142856,"apiPercentUsed":100}}"#.data(using: .utf8)!
+    let exhaustedOther = try CursorUsageReader.parse(data: exhaustedOtherData, now: now, planName: "Pro")
+    #expect(exhaustedOther.limits.map(\.label) == ["Composer + Grok", "Other models"])
+    #expect(exhaustedOther.limits.map { Int($0.displayPercent.rounded()) } == [86, 0])
+    #expect(exhaustedOther.headlinePercent == 0)
+
+    // Spend/limit fallback for Other models when explicit percent scalar is absent.
+    let spendFallbackData = #"{"billingCycleEnd":"1787914128000","planUsage":{"autoPercentUsed":10,"apiSpend":500,"apiLimit":2000}}"#.data(using: .utf8)!
+    let spendFallback = try CursorUsageReader.parse(data: spendFallbackData, now: now, planName: "Pro")
+    #expect(spendFallback.limits.map(\.label) == ["Composer + Grok", "Other models"])
+    #expect(spendFallback.limits.map { Int($0.displayPercent.rounded()) } == [90, 75])
+    #expect(spendFallback.headlinePercent == 75)
 }
 
 @Test func cursorParsesEnterpriseSpendLimitsIncludedPoolsAndUnlimitedSeats() throws {
@@ -146,11 +161,15 @@ import Testing
     #expect(!challenge.loginURL.absoluteString.contains("secret-verifier-value"))
 }
 
-@Test func cursorUsageRejectsResponseWithoutFirstPartyPool() {
-    let data = #"{"planUsage":{"apiPercentUsed":100}}"#.data(using: .utf8)!
+@Test func cursorUsageSupportsOtherModelsOnlyAndRejectsEmptyResponse() throws {
+    let otherOnly = #"{"billingCycleEnd":"1787914128000","planUsage":{"apiPercentUsed":25}}"#.data(using: .utf8)!
+    let parsed = try CursorUsageReader.parse(data: otherOnly, now: .now)
+    #expect(parsed.limits.map(\.label) == ["Other models"])
+    #expect(parsed.headlinePercent == 75)
 
+    let empty = #"{"planUsage":{}}"#.data(using: .utf8)!
     #expect(throws: UsageReadError.self) {
-        try CursorUsageReader.parse(data: data, now: .now)
+        try CursorUsageReader.parse(data: empty, now: .now)
     }
 }
 

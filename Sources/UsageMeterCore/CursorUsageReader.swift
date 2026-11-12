@@ -256,16 +256,40 @@ public enum CursorUsageReader {
         var footnotes: [String] = []
 
         if let planUsage = root["planUsage"] as? [String: Any] {
-            if let autoPercent = finiteDouble(planUsage["autoPercentUsed"]) {
-                limits.append(
-                    UsageLimit(
-                        id: "cursor-first-party",
-                        label: "Composer + Grok",
-                        usedPercent: autoPercent,
-                        resetsAt: reset,
-                        displayMode: .remaining
+            let autoPercent = poolPercentUsed(
+                direct: planUsage["autoPercentUsed"],
+                spend: planUsage["autoSpend"],
+                limit: planUsage["autoLimit"]
+            )
+            let apiPercent = poolPercentUsed(
+                direct: planUsage["apiPercentUsed"],
+                spend: planUsage["apiSpend"],
+                limit: planUsage["apiLimit"]
+            )
+
+            if autoPercent != nil || apiPercent != nil {
+                if let autoPercent {
+                    limits.append(
+                        UsageLimit(
+                            id: "cursor-first-party",
+                            label: "Composer + Grok",
+                            usedPercent: autoPercent,
+                            resetsAt: reset,
+                            displayMode: .remaining
+                        )
                     )
-                )
+                }
+                if let apiPercent {
+                    limits.append(
+                        UsageLimit(
+                            id: "cursor-other-models",
+                            label: "Other models",
+                            usedPercent: apiPercent,
+                            resetsAt: reset,
+                            displayMode: .remaining
+                        )
+                    )
+                }
             } else if let limitCents = finiteDouble(planUsage["limit"]), limitCents > 0 {
                 let includedCents = finiteDouble(planUsage["includedSpend"]) ?? 0
                 let usedPercent = min(max((includedCents / limitCents) * 100, 0), 100)
@@ -471,6 +495,21 @@ public enum CursorUsageReader {
         }
         if let string = value as? String {
             return TimeInterval(string)
+        }
+        return nil
+    }
+
+    private static func poolPercentUsed(
+        direct: Any?,
+        spend: Any?,
+        limit: Any?
+    ) -> Double? {
+        if let percent = finiteDouble(direct) {
+            return min(max(percent, 0), 100)
+        }
+        if let limitCents = finiteDouble(limit), limitCents > 0 {
+            let spendCents = finiteDouble(spend) ?? 0
+            return min(max((spendCents / limitCents) * 100, 0), 100)
         }
         return nil
     }

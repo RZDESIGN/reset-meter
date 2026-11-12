@@ -500,9 +500,16 @@ final class UsageStore: ObservableObject {
             resetsAt: now.addingTimeInterval(1_256_340),
             displayMode: .remaining
         )
+        let cursorOtherModels = UsageLimit(
+            id: "cursor-demo-other-models",
+            label: "Other models",
+            usedPercent: 32,
+            resetsAt: now.addingTimeInterval(1_256_340),
+            displayMode: .remaining
+        )
         demoUsage[cursorDefault.id] = ProviderUsage(
             provider: .cursor,
-            limits: [cursorIncluded],
+            limits: [cursorIncluded, cursorOtherModels],
             updatedAt: now,
             sourceDescription: "Live local Cursor pool",
             planName: "Pro"
