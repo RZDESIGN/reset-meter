@@ -130,60 +130,52 @@ enum MenuBarArtwork {
 
 struct UsagePopover: View {
     @ObservedObject var store: UsageStore
-    @State private var contentHeight: CGFloat = 0
 
-    private static let maximumListHeight: CGFloat = 760
+    static let maximumListHeight: CGFloat = 620
 
     var body: some View {
         VStack(spacing: 11) {
             header
 
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(store.visibleEntries) { entry in
-                        ProviderCard(
-                            entry: entry,
-                            onConnectCursor: { store.connectCursor(entry.account) },
-                            onCancelCursor: { store.cancelCursorConnect(entry.account) }
-                        )
-                    }
-                    if store.visibleEntries.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "eye.slash")
-                                .font(.title3)
-                                .foregroundStyle(.tertiary)
-                            Text("All meters are hidden.")
-                                .font(.callout.weight(.medium))
-                            Text("Enable local accounts from Providers below.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                    }
+            CappedVerticalLayout(maxHeight: Self.maximumListHeight) {
+                ScrollView {
+                    cardsList
                 }
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
-                    }
-                }
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            .frame(height: listHeight)
-            .onPreferenceChange(ContentHeightKey.self) { height in
-                contentHeight = height
+                .scrollBounceBehavior(.basedOnSize)
             }
 
             footer
         }
         .padding(14)
         .frame(width: 364)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(PopoverWindowSizer())
     }
 
-    private var listHeight: CGFloat {
-        guard !store.visibleEntries.isEmpty else { return 112 }
-        guard contentHeight > 0 else { return Self.maximumListHeight }
-        return min(contentHeight, Self.maximumListHeight)
+    private var cardsList: some View {
+        VStack(spacing: 8) {
+            ForEach(store.visibleEntries) { entry in
+                ProviderCard(
+                    entry: entry,
+                    onConnectCursor: { store.connectCursor(entry.account) },
+                    onCancelCursor: { store.cancelCursorConnect(entry.account) }
+                )
+            }
+            if store.visibleEntries.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "eye.slash")
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
+                    Text("All meters are hidden.")
+                        .font(.callout.weight(.medium))
+                    Text("Enable local accounts from Providers below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+        }
     }
 
     private var header: some View {
@@ -256,11 +248,126 @@ struct UsagePopover: View {
     }
 }
 
-private struct ContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat { 0 }
+/// Measures the `ScrollView` at its natural content height synchronously on the first pass,
+/// clamping only when cards exceed `maxHeight` so 1–4 providers size tightly without blank space.
+private struct CappedVerticalLayout: Layout {
+    let maxHeight: CGFloat
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let subview = subviews.first else { return .zero }
+        let ideal = subview.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        let limit = min(proposal.height ?? maxHeight, maxHeight)
+        return CGSize(width: ideal.width, height: min(ideal.height, limit))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(
+            at: bounds.origin,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
+    }
+}
+
+/// Keeps the backing borderless `MenuBarExtra(.window)` panel height synchronized with
+/// SwiftUI's intrinsic height (both growing and shrinking) while anchoring `maxY` under the menu bar.
+private struct PopoverWindowSizer: NSViewRepresentable {
+    func makeNSView(context: Context) -> PopoverWindowObserverView {
+        PopoverWindowObserverView()
+    }
+
+    func updateNSView(_ nsView: PopoverWindowObserverView, context: Context) {
+        nsView.scheduleSync()
+    }
+}
+
+@MainActor
+final class PopoverWindowObserverView: NSView {
+    private var lastHeight: CGFloat = 0
+    private var syncScheduled = false
+    nonisolated(unsafe) private var windowObservers: [NSObjectProtocol] = []
+
+    deinit {
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windowObservers.removeAll()
+
+        guard let window else { return }
+        let notifications: [Notification.Name] = [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didExposeNotification,
+        ]
+        for name in notifications {
+            windowObservers.append(
+                NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.syncWindowHeight()
+                    }
+                }
+            )
+        }
+        scheduleSync()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if abs(newSize.height - lastHeight) > 0.5 {
+            lastHeight = newSize.height
+            scheduleSync()
+        }
+    }
+
+    func scheduleSync() {
+        guard !syncScheduled else { return }
+        syncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.syncScheduled = false
+            self.syncWindowHeight()
+        }
+    }
+
+    func syncWindowHeight() {
+        guard let window,
+              !window.styleMask.contains(.titled),
+              let contentView = window.contentView else { return }
+        let anchorMaxY = window.frame.maxY
+        let anchorX = window.frame.origin.x
+        let anchorWidth = window.frame.width
+
+        contentView.layoutSubtreeIfNeeded()
+        let fitting = contentView.fittingSize
+        guard fitting.width > 0, fitting.height > 0 else { return }
+        let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: fitting)).size
+
+        if window.contentMinSize.height > fitting.height {
+            window.contentMinSize.height = 0
+        }
+        if window.minSize.height > targetFrameSize.height {
+            window.minSize.height = 0
+        }
+
+        let current = window.frame
+        guard abs(current.height - targetFrameSize.height) > 0.5
+            || abs(current.maxY - anchorMaxY) > 0.5 else { return }
+
+        let anchored = NSRect(
+            x: anchorX,
+            y: anchorMaxY - targetFrameSize.height,
+            width: anchorWidth,
+            height: targetFrameSize.height
+        )
+        window.setFrame(anchored, display: window.isVisible)
+        if window.isVisible {
+            window.invalidateShadow()
+        }
     }
 }
 
