@@ -102,16 +102,19 @@ enum ClaudeDesktopUsageReader {
         ]
 
         let sampleDate = Date(timeIntervalSince1970: latest.t / 1_000)
+        let sampleAge = max(0, now.timeIntervalSince(sampleDate))
         let limits = windows.compactMap { shortKey, liveID, label, duration -> UsageLimit? in
-            guard let used = latest.u[shortKey], used.isFinite else { return nil }
-            let preservedReset = previousSnapshot?.limits
+            guard let rawUsed = latest.u[shortKey], rawUsed.isFinite else { return nil }
+            let previousReset = previousSnapshot?.limits
                 .first(where: { $0.id == liveID || $0.label == label })?
                 .resetsAt
-                .flatMap { $0 > now ? $0 : nil }
+            let preservedReset = previousReset.flatMap { $0 > now ? $0 : nil }
+            let windowResetSinceSample = (previousReset.map { $0 > sampleDate && $0 <= now } ?? false)
+                || sampleAge >= Double(duration * 60)
             return UsageLimit(
                 id: liveID,
                 label: label,
-                usedPercent: used,
+                usedPercent: windowResetSinceSample ? 0 : rawUsed,
                 resetsAt: preservedReset,
                 durationMinutes: duration,
                 displayMode: .remaining

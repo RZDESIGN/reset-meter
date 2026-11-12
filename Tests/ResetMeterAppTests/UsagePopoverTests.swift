@@ -18,16 +18,23 @@ import UsageMeterCore
     )
     store.loadDemoData(multipleAccounts: true)
 
-    let renderer = ImageRenderer(content: UsagePopover(store: store))
-    renderer.proposedSize = ProposedViewSize(width: 364, height: 100)
-    let image = try #require(renderer.nsImage)
-    #expect(image.size.height > 450)
+    // Measure via AppKit NSHostingView (the same host MenuBarExtra(.window) uses) rather than
+    // SwiftUI.ImageRenderer so headless Intel CI VMs without Metal devices never initialize MTLLoader.
+    let hosting = NSHostingView(rootView: UsagePopover(store: store))
+    hosting.frame = NSRect(x: 0, y: 0, width: 364, height: 100)
+    hosting.layoutSubtreeIfNeeded()
+    let fitted = hosting.fittingSize
+    #expect(fitted.width >= 364)
+    #expect(fitted.height > 450)
 
-    for style in MenuBarStyle.allCases {
-        store.menuBarStyle = style
-        let labelRenderer = ImageRenderer(content: StatusLabel(store: store))
-        let labelImage = try #require(labelRenderer.nsImage)
-        #expect(labelImage.size.width > 40)
-        #expect(labelImage.size.height >= 18)
-    }
+    let fullBar = MenuBarArtwork.image(groups: store.menuGroups, style: .barsAndPercent)
+    let barsOnly = MenuBarArtwork.image(groups: store.menuGroups, style: .barsOnly)
+    let percentOnly = MenuBarArtwork.image(groups: store.menuGroups, style: .percentOnly)
+
+    #expect(fullBar.isTemplate)
+    #expect(fullBar.size.height == 18)
+    #expect(barsOnly.size.width > 40)
+    #expect(percentOnly.size.width > 40)
+    #expect(fullBar.size.width > barsOnly.size.width)
+    #expect(fullBar.size.width > percentOnly.size.width)
 }

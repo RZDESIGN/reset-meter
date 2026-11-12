@@ -7,4 +7,4 @@ Reset Meter runs only in the macOS menu bar, so it does not appear in the Dock.
 
 If this build is not Apple-notarized, Control-click Reset Meter in Applications, choose Open, then confirm once. Future launches open normally.
 
-Reset Meter is an independent community project and is not affiliated with OpenAI, Anthropic, Cursor, or Apple.
+Reset Meter is an independent community project and is not affiliated with OpenAI, Anthropic, Google, Cursor, or Apple.

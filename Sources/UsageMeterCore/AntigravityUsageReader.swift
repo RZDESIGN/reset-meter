@@ -34,32 +34,11 @@ public enum AntigravityUsageReader {
         now: Date,
         cacheDirectory: URL
     ) -> ProviderUsage? {
-        guard let cached = UsageSnapshotCache.load(accountID: accountID, directory: cacheDirectory) else {
-            return nil
-        }
-        // If a quota window's reset timestamp has already passed while Antigravity was closed,
-        // reflect that the window has reset to full capacity rather than showing a past countdown.
-        let adjustedLimits = cached.limits.map { limit -> UsageLimit in
-            if let reset = limit.resetsAt, reset <= now {
-                return UsageLimit(
-                    id: limit.id,
-                    label: limit.label,
-                    usedPercent: 0,
-                    resetsAt: nil,
-                    durationMinutes: limit.durationMinutes,
-                    displayMode: limit.displayMode
-                )
-            }
-            return limit
-        }
-        return ProviderUsage(
-            provider: .antigravity,
-            limits: adjustedLimits,
-            updatedAt: cached.updatedAt,
+        UsageSnapshotCache.staleFallback(
+            accountID: accountID,
+            now: now,
             sourceDescription: "Antigravity cache · open Antigravity to update",
-            isStale: true,
-            planName: cached.planName,
-            footnote: cached.footnote
+            directory: cacheDirectory
         )
     }
 
@@ -98,7 +77,7 @@ public enum AntigravityUsageReader {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 2.5
+        request.timeoutInterval = 1.5
         request.httpShouldHandleCookies = false
         request.httpBody = Data(#"{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}"#.utf8)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -324,13 +303,18 @@ public enum AntigravityUsageReader {
     // MARK: - Process Discovery
 
     static func discoverTargets(account: ProviderAccount) -> [ServerTarget] {
-        guard let psOutput = runCommand(URL(fileURLWithPath: "/bin/ps"), ["-axo", "pid,command"]) else {
+        guard let psOutput = SubprocessRunner.runString(
+            executable: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-axo", "pid,command"],
+            timeout: 3
+        ) else {
             return []
         }
         return parseTargets(psOutput: psOutput) { pid in
-            guard let lsofOutput = runCommand(
-                URL(fileURLWithPath: "/usr/sbin/lsof"),
-                ["-Pan", "-p", pid, "-iTCP", "-sTCP:LISTEN"]
+            guard let lsofOutput = SubprocessRunner.runString(
+                executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
+                arguments: ["-Pan", "-p", pid, "-iTCP", "-sTCP:LISTEN"],
+                timeout: 3
             ) else { return [] }
             return parseListeningPorts(lsofOutput: lsofOutput)
         }
@@ -358,12 +342,14 @@ public enum AntigravityUsageReader {
     static func parseListeningPorts(lsofOutput: String) -> [Int] {
         var ports: [Int] = []
         var seen = Set<Int>()
+        let markers = ["127.0.0.1:", "[::1]:"]
         for line in lsofOutput.split(whereSeparator: \.isNewline) {
-            guard let range = line.range(of: "127.0.0.1:") else { continue }
-            let suffix = line[range.upperBound...]
-            let digits = suffix.prefix(while: \.isNumber)
-            if let port = Int(digits), port > 0, seen.insert(port).inserted {
-                ports.append(port)
+            for marker in markers {
+                guard let range = line.range(of: marker) else { continue }
+                let digits = line[range.upperBound...].prefix(while: \.isNumber)
+                if let port = Int(digits), port > 0, seen.insert(port).inserted {
+                    ports.append(port)
+                }
             }
         }
         return ports
@@ -380,24 +366,6 @@ public enum AntigravityUsageReader {
             }
         }
         return nil
-    }
-
-    private static func runCommand(_ executable: URL, _ arguments: [String], timeout: TimeInterval = 3) -> String? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        guard process.terminationReason == .exit, process.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
     }
 
     private static let plainLoopbackClient = URLSession(configuration: .ephemeral)

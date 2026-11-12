@@ -21,7 +21,7 @@ struct StatusLabel: View {
 }
 
 @MainActor
-private enum MenuBarArtwork {
+enum MenuBarArtwork {
     private static let height: CGFloat = 18
     private static let iconSize: CGFloat = 14
     private static let barSize = NSSize(width: 22, height: 5)
@@ -482,8 +482,12 @@ private struct LimitRow: View {
 
     private func resetText(now: Date) -> String? {
         guard let reset = limit.resetsAt else { return nil }
+        let remaining = reset.timeIntervalSince(now)
+        if remaining <= 0 {
+            return limit.resetIsEstimated ? "≈ resetting" : "Resetting…"
+        }
         let prefix = limit.resetIsEstimated ? "≈ " : "Resets in "
-        return prefix + UsageCountdown.duration(max(0, reset.timeIntervalSince(now)))
+        return prefix + UsageCountdown.duration(remaining)
     }
 }
 

@@ -23,54 +23,61 @@ public struct CursorCredentials: Codable, Equatable, Sendable {
         return expiry <= now.timeIntervalSince1970 + 60
     }
 
-    private static let serviceName = "app.resetmeter.macos.cursor"
-    private static let securityExecutable = URL(fileURLWithPath: "/usr/bin/security")
+    static let serviceName = "app.resetmeter.macos.cursor"
+    public static let defaultSecurityExecutable = URL(fileURLWithPath: "/usr/bin/security")
 
     // MARK: - Reset Meter Isolated Session (for Cursor 3.29+ encrypted desktop storage)
 
-    public static func hasSavedSession(account: ProviderAccount) -> Bool {
-        (try? readSaved(account: account)) != nil
+    public static func hasSavedSession(
+        account: ProviderAccount,
+        securityTool: URL = defaultSecurityExecutable
+    ) -> Bool {
+        (try? readSaved(account: account, securityTool: securityTool)) != nil
     }
 
-    public static func readSaved(account: ProviderAccount) throws -> Self {
+    public static func readSaved(
+        account: ProviderAccount,
+        securityTool: URL = defaultSecurityExecutable,
+        allowLegacyFrameworkFallback: Bool = true
+    ) throws -> Self {
         guard account.isValid, account.provider == .cursor else {
             throw UsageReadError.cursorCredentialsUnavailable
         }
 
-        // Try /usr/bin/security first (never triggers Keychain prompts across ad-hoc rebuilds).
-        for accountKey in candidateAccountKeys(for: account) {
-            if let raw = readSecurityPassword(service: serviceName, account: accountKey),
-               let data = raw.data(using: .utf8),
-               let decoded = try? JSONDecoder().decode(Self.self, from: data),
-               !decoded.accessToken.isEmpty,
-               !decoded.refreshToken.isEmpty {
-                return decoded
-            }
+        // Check `/usr/bin/security` first (owns the ACL so ad-hoc rebuilds never trigger prompts).
+        if let raw = readSecurityPassword(service: serviceName, account: account.id, securityTool: securityTool),
+           let decoded = decodeStoredCredentials(raw) {
+            return decoded
         }
 
         // Fallback to legacy Security.framework item if present from v0.5.
-        for accountKey in candidateAccountKeys(for: account) {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: serviceName,
-                kSecAttrAccount as String: accountKey,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne,
-            ]
-            var item: CFTypeRef?
-            if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-               let data = item as? Data,
-               let decoded = try? JSONDecoder().decode(Self.self, from: data),
-               !decoded.accessToken.isEmpty,
-               !decoded.refreshToken.isEmpty {
-                return decoded
+        if allowLegacyFrameworkFallback {
+            for accountKey in legacyAccountKeys(for: account) {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: serviceName,
+                    kSecAttrAccount as String: accountKey,
+                    kSecReturnData as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne,
+                ]
+                var item: CFTypeRef?
+                if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+                   let data = item as? Data,
+                   let raw = String(data: data, encoding: .utf8),
+                   let decoded = decodeStoredCredentials(raw) {
+                    return decoded
+                }
             }
         }
 
         throw UsageReadError.cursorSignedOut
     }
 
-    public static func save(_ credentials: Self, account: ProviderAccount) throws {
+    public static func save(
+        _ credentials: Self,
+        account: ProviderAccount,
+        securityTool: URL = defaultSecurityExecutable
+    ) throws {
         guard account.isValid,
               account.provider == .cursor,
               !credentials.accessToken.isEmpty,
@@ -78,50 +85,42 @@ public struct CursorCredentials: Codable, Equatable, Sendable {
             throw UsageReadError.cursorCredentialsUnavailable
         }
         let encoded = try JSONEncoder().encode(credentials)
-        guard let json = String(data: encoded, encoding: .utf8) else {
-            throw UsageReadError.cursorCredentialsUnavailable
-        }
+        // Encode as Base64 (`[A-Za-z0-9+/=]`) before passing via `/usr/bin/security -i` stdin:
+        // Apple's `SecurityTool` interactive line splitter toggles on `"` without honoring `\"`,
+        // whereas Base64 contains zero quotes, spaces, or backslashes, and keeps tokens out of `ps`.
+        let payload = encoded.base64EncodedString()
+        let command = "add-generic-password -U -a \"\(account.id)\" -s \"\(serviceName)\" -w \"\(payload)\"\n"
 
-        // Pass command via `/usr/bin/security -i` stdin so tokens never appear in `ps` arguments
-        // and `/usr/bin/security` owns the ACL (avoiding Keychain prompts across ad-hoc app updates).
-        let escapedAccount = escapeSecurityArg(account.id)
-        let escapedService = escapeSecurityArg(serviceName)
-        let escapedSecret = escapeSecurityArg(json)
-        let command = "add-generic-password -U -a \"\(escapedAccount)\" -s \"\(escapedService)\" -w \"\(escapedSecret)\"\n"
-
-        let process = Process()
-        let stdinPipe = Pipe()
-        process.executableURL = securityExecutable
-        process.arguments = ["-i"]
-        process.standardInput = stdinPipe
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        stdinPipe.fileHandleForWriting.write(Data(command.utf8))
-        try? stdinPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        guard let result = SubprocessRunner.run(
+            executable: securityTool,
+            arguments: ["-i"],
+            stdinData: Data(command.utf8),
+            timeout: 5
+        ), result.succeeded else {
             throw UsageReadError.cursorCredentialsUnavailable
         }
     }
 
-    public static func remove(account: ProviderAccount) {
+    public static func remove(
+        account: ProviderAccount,
+        securityTool: URL = defaultSecurityExecutable,
+        removeLegacyFrameworkItems: Bool = true
+    ) {
         guard account.isValid, account.provider == .cursor else { return }
-        for accountKey in candidateAccountKeys(for: account) {
-            let process = Process()
-            process.executableURL = securityExecutable
-            process.arguments = ["delete-generic-password", "-a", accountKey, "-s", serviceName]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try? process.run()
-            process.waitUntilExit()
-
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: serviceName,
-                kSecAttrAccount as String: accountKey,
-            ]
-            SecItemDelete(query as CFDictionary)
+        for accountKey in legacyAccountKeys(for: account) {
+            _ = SubprocessRunner.run(
+                executable: securityTool,
+                arguments: ["delete-generic-password", "-a", accountKey, "-s", serviceName],
+                timeout: 5
+            )
+            if removeLegacyFrameworkItems {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: serviceName,
+                    kSecAttrAccount as String: accountKey,
+                ]
+                SecItemDelete(query as CFDictionary)
+            }
         }
     }
 
@@ -129,7 +128,10 @@ public struct CursorCredentials: Codable, Equatable, Sendable {
 
     /// Reads existing `cursor-agent` CLI credentials (`~/.cursor/auth.json` or Keychain `cursor-access-token`)
     /// in strictly read-only mode without prompting or modifying them.
-    public static func readLocalCLI(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String? {
+    public static func readLocalCLI(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        securityTool: URL = defaultSecurityExecutable
+    ) -> String? {
         let authFile = home.appending(path: ".cursor/auth.json")
         if let data = try? Data(contentsOf: authFile),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -139,8 +141,11 @@ public struct CursorCredentials: Codable, Equatable, Sendable {
             return token
         }
 
-        if let token = readSecurityPassword(service: "cursor-access-token", account: "cursor-user"),
-           !token.hasPrefix("cursor-safe-storage:") {
+        if let token = readSecurityPassword(
+            service: "cursor-access-token",
+            account: "cursor-user",
+            securityTool: securityTool
+        ), !token.hasPrefix("cursor-safe-storage:") {
             return token
         }
         return nil
@@ -148,35 +153,40 @@ public struct CursorCredentials: Codable, Equatable, Sendable {
 
     // MARK: - Helpers
 
-    private static func candidateAccountKeys(for account: ProviderAccount) -> [String] {
+    static func decodeStoredCredentials(_ raw: String) -> Self? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let candidates = [Data(base64Encoded: trimmed), Data(trimmed.utf8)].compactMap { $0 }
+        for data in candidates {
+            if let decoded = try? JSONDecoder().decode(Self.self, from: data),
+               !decoded.accessToken.isEmpty,
+               !decoded.refreshToken.isEmpty {
+                return decoded
+            }
+        }
+        return nil
+    }
+
+    private static func legacyAccountKeys(for account: ProviderAccount) -> [String] {
         if account.id == "cursor:default" {
             return ["cursor:default", "default"]
         }
         return [account.id]
     }
 
-    private static func readSecurityPassword(service: String, account: String) -> String? {
-        let process = Process()
-        let stdout = Pipe()
-        process.executableURL = securityExecutable
-        process.arguments = ["find-generic-password", "-a", account, "-s", service, "-w"]
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        let data = (try? stdout.fileHandleForReading.readToEnd()) ?? Data()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let value = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
+    private static func readSecurityPassword(
+        service: String,
+        account: String,
+        securityTool: URL
+    ) -> String? {
+        guard let output = SubprocessRunner.runString(
+            executable: securityTool,
+            arguments: ["find-generic-password", "-a", account, "-s", service, "-w"],
+            timeout: 5
+        ) else {
             return nil
         }
-        return value
-    }
-
-    private static func escapeSecurityArg(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

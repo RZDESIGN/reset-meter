@@ -6,6 +6,10 @@ import UsageMeterCore
 enum AccountWindow {
     private static var window: NSWindow?
 
+    static var isVisible: Bool {
+        window?.isVisible == true
+    }
+
     static func show(store: UsageStore) {
         if window == nil {
             let window = NSWindow(
@@ -23,6 +27,9 @@ enum AccountWindow {
         }
         NSApplication.shared.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        if store.accounts.contains(where: { store.usageByID[$0.id] == nil && store.errorsByID[$0.id] == nil }) {
+            Task { await store.refresh(includeHidden: true) }
+        }
     }
 }
 
@@ -128,7 +135,7 @@ struct AccountSettings: View {
                     .frame(width: 24, height: 24)
             } else {
                 Button {
-                    Task { await store.refresh() }
+                    Task { await store.refresh(includeHidden: true) }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -233,6 +240,11 @@ private struct AccountControls: View {
                     .controlSize(.small)
                     .onChange(of: name) { _, value in
                         store.renameAccount(entry.account, name: value)
+                    }
+                    .onChange(of: entry.accountName) { _, updated in
+                        if name != updated {
+                            name = updated
+                        }
                     }
 
                 Button {

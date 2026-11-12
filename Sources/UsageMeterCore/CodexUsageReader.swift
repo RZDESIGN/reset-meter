@@ -2,10 +2,28 @@ import Foundation
 
 public enum CodexUsageReader {
     public static func fetch(
-        account: ProviderAccount = .defaultAccount(for: .codex)
+        account: ProviderAccount = .defaultAccount(for: .codex),
+        cacheDirectory: URL = UsageSnapshotCache.defaultDirectory
     ) async throws -> ProviderUsage {
-        let output = try await execute(account: account)
-        return try parse(output: output, now: Date())
+        guard account.isValid, account.provider == .codex else {
+            throw UsageReadError.codexAccountUnavailable
+        }
+        do {
+            let output = try await execute(account: account)
+            let usage = try parse(output: output, now: Date())
+            UsageSnapshotCache.save(usage, accountID: account.id, directory: cacheDirectory)
+            return usage
+        } catch UsageReadError.codexTimedOut {
+            if let cached = UsageSnapshotCache.staleFallback(
+                accountID: account.id,
+                now: Date(),
+                sourceDescription: "Codex cache · reconnect to update",
+                directory: cacheDirectory
+            ) {
+                return cached
+            }
+            throw UsageReadError.codexTimedOut
+        }
     }
 
     private static func execute(account: ProviderAccount) async throws -> Data {

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import UsageMeterCore
 
@@ -24,7 +25,9 @@ final class UsageStore: ObservableObject {
     private static let legacyHiddenEntriesKey = "hiddenUsageEntries.v1"
     private static let menuBarStyleKey = "menuBarStyle.v1"
 
-    private var refreshTimer: Timer?
+    private let autoRefreshEnabled: Bool
+    nonisolated(unsafe) private var refreshTimer: Timer?
+    nonisolated(unsafe) private var wakeObserver: NSObjectProtocol?
     private var cursorConnectTasks: [String: Task<Void, Never>] = [:]
     private let fetcher: @Sendable (ProviderAccount) async throws -> ProviderUsage
     private let cursorSignIn: @Sendable (ProviderAccount) async throws -> Void
@@ -41,6 +44,7 @@ final class UsageStore: ObservableObject {
         cursorSignIn: @escaping @Sendable (ProviderAccount) async throws -> Void = { try await CursorLogin.signIn(account: $0) },
         fetcher: (@Sendable (ProviderAccount) async throws -> ProviderUsage)? = nil
     ) {
+        self.autoRefreshEnabled = autoRefresh
         self.preferences = preferences
         self.discoverer = discoverer
         self.antigravityInstalled = antigravityInstalled
@@ -91,9 +95,27 @@ final class UsageStore: ObservableObject {
                     await self?.refresh()
                 }
             }
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    await self?.refresh()
+                }
+            }
             Task { [weak self] in
                 await self?.refresh()
             }
+        }
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
     }
 
@@ -142,12 +164,16 @@ final class UsageStore: ObservableObject {
 
     func setVisible(_ visible: Bool, entryID: String) {
         guard entries.contains(where: { $0.id == entryID }) else { return }
+        let wasHidden = hiddenEntryIDs.contains(entryID)
         if visible {
             hiddenEntryIDs.remove(entryID)
         } else {
             hiddenEntryIDs.insert(entryID)
         }
         preferences.set(hiddenEntryIDs.sorted(), forKey: Self.hiddenEntriesKey)
+        if visible, wasHidden, autoRefreshEnabled, usageByID[entryID] == nil {
+            Task { await refresh() }
+        }
     }
 
     var menuEntries: [(UsageProvider, Int?)] {
@@ -182,7 +208,7 @@ final class UsageStore: ObservableObject {
         let discovered = Self.sanitizedAccounts(discoverer())
         accounts = Self.mergeAccounts(saved: accounts, discovered: discovered)
         saveAccounts()
-        Task { await refresh() }
+        Task { await refresh(includeHidden: true) }
     }
 
     func addLocalAccount(
@@ -203,7 +229,7 @@ final class UsageStore: ObservableObject {
         guard account.isValid else { return }
         accounts.append(account)
         saveAccounts()
-        Task { await refresh() }
+        Task { await refresh(includeHidden: true) }
     }
 
     func renameAccount(_ account: ProviderAccount, name: String) {
@@ -281,11 +307,21 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Refresh
 
-    func refresh() async {
+    func refresh(includeHidden: Bool = false) async {
         guard !isRefreshing else { return }
         isRefreshing = true
 
-        let snapshot = accounts
+        let shouldIncludeHidden = includeHidden || AccountWindow.isVisible
+        let snapshot = shouldIncludeHidden
+            ? accounts
+            : accounts.filter { !hiddenEntryIDs.contains($0.id) }
+
+        guard !snapshot.isEmpty else {
+            lastRefresh = Date()
+            isRefreshing = false
+            return
+        }
+
         let fetcher = self.fetcher
         async let cursorMetadata = Self.readCursorMetadata(for: snapshot)
         let results = await Self.fetchAll(snapshot, using: fetcher)
@@ -294,7 +330,9 @@ final class UsageStore: ObservableObject {
         for (id, plan) in plans {
             localPlansByID[id] = plan
         }
-        savedCursorSessionIDs = savedSessions
+        let queriedCursorIDs = Set(snapshot.filter { $0.provider == .cursor }.map(\.id))
+        savedCursorSessionIDs.subtract(queriedCursorIDs)
+        savedCursorSessionIDs.formUnion(savedSessions)
 
         for (id, usage, error) in results {
             guard accounts.contains(where: { $0.id == id }) else { continue }

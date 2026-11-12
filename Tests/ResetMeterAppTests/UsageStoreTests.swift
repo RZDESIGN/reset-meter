@@ -252,6 +252,30 @@ import UsageMeterCore
     #expect(await counter.count(for: .codex) == 1)
     #expect(store.usageByID["codex:default"]?.headlinePercent == 75)
     #expect(store.usageByID["codex:dup"]?.headlinePercent == 75)
+    // Hidden uninstalled providers are skipped during background refreshes unless includeHidden is requested.
+    #expect(await counter.count(for: .antigravity) == 0)
+    #expect(await counter.count(for: .cursor) == 0)
+
+    let defaultWithHidden = UsageStore(
+        autoRefresh: false,
+        preferences: preferences,
+        discoverer: { UsageProvider.allCases.map { ProviderAccount.defaultAccount(for: $0) } },
+        antigravityInstalled: { false },
+        cursorInstalled: { false },
+        fetcher: { account in
+            await counter.record(account.provider)
+            return ProviderUsage(
+                provider: account.provider,
+                limits: [UsageLimit(id: "w", label: "Weekly", usedPercent: 10, resetsAt: nil, displayMode: .remaining)],
+                updatedAt: .now,
+                sourceDescription: "Test"
+            )
+        }
+    )
+    await defaultWithHidden.refresh(includeHidden: false)
+    #expect(await counter.count(for: .cursor) == 0)
+    await defaultWithHidden.refresh(includeHidden: true)
+    #expect(await counter.count(for: .cursor) == 1)
 }
 
 private final class DiscoveryBox: @unchecked Sendable {

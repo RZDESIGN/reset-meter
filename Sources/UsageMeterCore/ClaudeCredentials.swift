@@ -82,9 +82,10 @@ struct ClaudeCredentials: Decodable, Sendable {
         metadata: ClaudeLocalMetadata,
         home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Self? {
-        guard let pidsOutput = runCommand(
-            URL(fileURLWithPath: "/usr/bin/pgrep"),
-            ["-u", "\(getuid())", "-f", "claude.app/Contents/MacOS/claude"]
+        guard let pidsOutput = SubprocessRunner.runString(
+            executable: URL(fileURLWithPath: "/usr/bin/pgrep"),
+            arguments: ["-i", "-u", "\(getuid())", "-f", #"claude\.app/Contents/MacOS/claude|claude-code/.*/claude"#],
+            timeout: 3
         ) else { return nil }
 
         let pids = pidsOutput
@@ -98,7 +99,11 @@ struct ClaudeCredentials: Decodable, Sendable {
         let isDefaultCodeDir = account.isDefaultClaudeCodeDirectory(home: home)
 
         for pid in pids {
-            guard let psOutput = runCommand(URL(fileURLWithPath: "/bin/ps"), ["eww", "-p", pid]) else { continue }
+            guard let psOutput = SubprocessRunner.runString(
+                executable: URL(fileURLWithPath: "/bin/ps"),
+                arguments: ["eww", "-p", pid],
+                timeout: 3
+            ) else { continue }
             guard let credentials = matchDesktopProcessEnvironment(
                 psOutput: psOutput,
                 expectedOrganizationUUID: metadata.organizationUUID,
@@ -172,32 +177,55 @@ struct ClaudeCredentials: Decodable, Sendable {
         return try parse(data)
     }
 
-    private static func extractEnv(_ key: String, from psOutput: String) -> String? {
+    static func extractEnv(_ key: String, from psOutput: String) -> String? {
         let marker = key + "="
-        for token in psOutput.split(whereSeparator: \.isWhitespace) {
-            if token.hasPrefix(marker) {
-                let value = String(token.dropFirst(marker.count))
-                return value.isEmpty ? nil : value
+        var searchStart = psOutput.startIndex
+        while let range = psOutput.range(of: marker, range: searchStart..<psOutput.endIndex) {
+            let validBoundary = range.lowerBound == psOutput.startIndex
+                || psOutput[psOutput.index(before: range.lowerBound)].isWhitespace
+            guard validBoundary else {
+                searchStart = range.upperBound
+                continue
             }
+
+            let lineEnd = psOutput[range.upperBound...].firstIndex(where: \.isNewline) ?? psOutput.endIndex
+            let tail = psOutput[range.upperBound..<lineEnd]
+            var cursor = tail.startIndex
+            var valueEnd = tail.endIndex
+
+            while cursor < tail.endIndex {
+                if tail[cursor].isWhitespace {
+                    var nameStart = cursor
+                    while nameStart < tail.endIndex, tail[nameStart].isWhitespace {
+                        nameStart = tail.index(after: nameStart)
+                    }
+                    if Self.startsEnvironmentAssignment(in: tail, at: nameStart) {
+                        valueEnd = cursor
+                        break
+                    }
+                    cursor = nameStart
+                } else {
+                    cursor = tail.index(after: cursor)
+                }
+            }
+
+            let value = String(tail[..<valueEnd]).trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
         }
         return nil
     }
 
-    private static func runCommand(_ executable: URL, _ arguments: [String], timeout: TimeInterval = 3) -> String? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        guard process.terminationReason == .exit, process.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+    private static func startsEnvironmentAssignment(in text: Substring, at start: Substring.Index) -> Bool {
+        guard start < text.endIndex else { return false }
+        let first = text[start]
+        guard first.isASCII && (first.isLetter || first == "_") else { return false }
+        var idx = text.index(after: start)
+        while idx < text.endIndex {
+            let ch = text[idx]
+            if ch == "=" { return true }
+            if !(ch.isASCII && (ch.isLetter || ch.isNumber || ch == "_")) { return false }
+            idx = text.index(after: idx)
+        }
+        return false
     }
 }

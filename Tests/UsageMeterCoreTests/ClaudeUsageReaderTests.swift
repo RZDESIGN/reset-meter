@@ -73,6 +73,18 @@ func claudeDoesNotInventUsageForMissingOrMalformedWindows(_ json: String) {
     )
     #expect(matchedWork?.accessToken == "tok-work")
     #expect(matchedWork?.planName == "Team")
+
+    // Multi-word scope lists and config directories containing spaces (e.g. `Application Support`) must parse intact.
+    let psSpaced = "/Applications/Claude.app/Contents/MacOS/Claude CLAUDE_CONFIG_DIR=/Users/demo/Library/Application Support/Claude-Work CLAUDE_CODE_OAUTH_TOKEN=tok-spaced CLAUDE_CODE_OAUTH_SCOPES=user:inference user:profile CLAUDE_CODE_SUBSCRIPTION_TYPE=team"
+    let matchedSpaced = ClaudeCredentials.matchDesktopProcessEnvironment(
+        psOutput: psSpaced,
+        expectedOrganizationUUID: nil,
+        expectedCodeDir: "/Users/demo/Library/Application Support/Claude-Work",
+        expectedDesktopPrefix: "/Users/demo/Library/Application Support/Claude-Work/claude-code",
+        isDefaultCodeDir: false
+    )
+    #expect(matchedSpaced?.accessToken == "tok-spaced")
+    #expect(matchedSpaced?.scopes == ["user:inference", "user:profile"])
 }
 
 @Test func claudeDesktopCacheIgnoresExtraUsageCapAndPreservesVerifiedFutureReset() throws {
@@ -104,6 +116,17 @@ func claudeDoesNotInventUsageForMissingOrMalformedWindows(_ json: String) {
     #expect(workUsage.planName == "Team")
     #expect(workUsage.limits.map(\.label) == ["5-hour", "Weekly"])
     #expect(workUsage.limits[1].resetsAt == futureReset)
+
+    // A 5-hour sample older than 5 hours rolls over to 100% remaining while preserving recent 7-day usage.
+    let staleSampleData = Data(#"{"version":2,"samples":[{"t":1000000,"org":"org-work","u":{"fh":85,"sd":40}}]}"#.utf8)
+    let rolledOver = try ClaudeDesktopUsageReader.parse(
+        data: staleSampleData,
+        now: Date(timeIntervalSince1970: 1_000 + 6 * 3_600),
+        organizationUUID: "org-work",
+        planName: "Team"
+    )
+    #expect(rolledOver.limits[0].displayPercent == 100)
+    #expect(rolledOver.limits[1].displayPercent == 60)
 }
 
 @Test func claudeLocalLayerPipelineFallsThroughGracefullyWithoutMutatingLogins() async throws {

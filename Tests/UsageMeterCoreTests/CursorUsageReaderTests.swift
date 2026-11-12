@@ -154,6 +154,76 @@ import Testing
     }
 }
 
+@Test func cursorReadsLocalSQLiteStateAndRoundTripsBase64SecurityStdin() throws {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appending(path: "ResetMeterCursorSQLite-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: home) }
+
+    let dbDir = home.appending(path: "Library/Application Support/Cursor/User/globalStorage")
+    try fm.createDirectory(at: dbDir, withIntermediateDirectories: true)
+    let dbFile = dbDir.appending(path: "state.vscdb")
+
+    let setupSQL = """
+    CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
+    INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/stripeMembershipType', '"enterprise"');
+    INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', 'cursor-safe-storage:v1:encryptedpayload');
+    """
+    let initDB = SubprocessRunner.run(
+        executable: URL(fileURLWithPath: "/usr/bin/sqlite3"),
+        arguments: [dbFile.path, setupSQL]
+    )
+    #expect(initDB?.succeeded == true)
+
+    let account = ProviderAccount.defaultAccount(for: .cursor)
+    let state = CursorUsageReader.readLocalState(account: account, home: home)
+    #expect(state.databaseExists)
+    #expect(state.isEncryptedAtRest)
+    #expect(state.plaintextAccessToken == nil)
+    #expect(state.planName == "Enterprise")
+
+    // Verify CursorCredentials.save writes quote-free Base64 to `security -i` stdin and readSaved decodes both Base64 and legacy JSON.
+    let storeDir = fm.temporaryDirectory.appending(path: "ResetMeterCursorSec-\(UUID().uuidString)")
+    try fm.createDirectory(at: storeDir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: storeDir) }
+
+    let capturedFile = storeDir.appending(path: "stdin.txt")
+    let secretFile = storeDir.appending(path: "secret.txt")
+    let fakeSec = storeDir.appending(path: "security")
+    let script = """
+    #!/bin/sh
+    if [ "$1" = "-i" ]; then
+      IFS= read -r line
+      printf '%s' "$line" > '\(capturedFile.path)'
+      secret=$(printf '%s' "$line" | sed -n 's/.*-w "\\([^"]*\\)".*/\\1/p')
+      printf '%s' "$secret" > '\(secretFile.path)'
+      exit 0
+    fi
+    if [ "$1" = "find-generic-password" ]; then
+      [ -f '\(secretFile.path)' ] || exit 44
+      cat '\(secretFile.path)'
+      exit 0
+    fi
+    exit 0
+    """
+    try Data(script.utf8).write(to: fakeSec)
+    try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeSec.path)
+
+    let creds = CursorCredentials(accessToken: "jwt-tok-123", refreshToken: "ref-tok-456")
+    try CursorCredentials.save(creds, account: account, securityTool: fakeSec)
+
+    let rawStdin = try String(contentsOf: capturedFile, encoding: .utf8)
+    #expect(!rawStdin.contains("accessToken"))
+    #expect(!rawStdin.contains("\\\""))
+
+    let loaded = try CursorCredentials.readSaved(
+        account: account,
+        securityTool: fakeSec,
+        allowLegacyFrameworkFallback: false
+    )
+    #expect(loaded == creds)
+    #expect(CursorCredentials.decodeStoredCredentials(#"{"accessToken":"a","refreshToken":"b"}"#) == CursorCredentials(accessToken: "a", refreshToken: "b"))
+}
+
 private final class SavedBox: @unchecked Sendable {
     var saved: CursorCredentials?
 }

@@ -24,6 +24,42 @@ public enum UsageSnapshotCache {
         return try? JSONDecoder().decode(ProviderUsage.self, from: data)
     }
 
+    /// Loads a cached usage snapshot as an offline/closed-app fallback, marking `isStale = true`
+    /// and rolling over any quota window whose verified `resetsAt` has already passed.
+    public static func staleFallback(
+        accountID: String,
+        now: Date = .now,
+        sourceDescription: String,
+        directory: URL = defaultDirectory
+    ) -> ProviderUsage? {
+        guard let cached = load(accountID: accountID, directory: directory) else {
+            return nil
+        }
+        let adjustedLimits = cached.limits.map { limit -> UsageLimit in
+            if let reset = limit.resetsAt, reset <= now {
+                return UsageLimit(
+                    id: limit.id,
+                    label: limit.label,
+                    usedPercent: 0,
+                    resetsAt: nil,
+                    durationMinutes: limit.durationMinutes,
+                    displayMode: limit.displayMode
+                )
+            }
+            return limit
+        }
+        return ProviderUsage(
+            provider: cached.provider,
+            limits: adjustedLimits,
+            updatedAt: cached.updatedAt,
+            sourceDescription: sourceDescription,
+            isStale: true,
+            bankedResets: cached.bankedResets,
+            planName: cached.planName,
+            footnote: cached.footnote
+        )
+    }
+
     private static func fileURL(for accountID: String, in directory: URL) -> URL {
         let digest = SHA256.hash(data: Data(accountID.utf8)).map { String(format: "%02x", $0) }.joined()
         return directory.appending(path: "\(digest.prefix(16)).json")

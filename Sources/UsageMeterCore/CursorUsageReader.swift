@@ -73,7 +73,12 @@ public enum CursorUsageReader {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            if let cached = UsageSnapshotCache.load(accountID: account.id, directory: cacheDirectory) {
+            if let cached = UsageSnapshotCache.staleFallback(
+                accountID: account.id,
+                now: Date(),
+                sourceDescription: "Cursor cache · reconnect to update",
+                directory: cacheDirectory
+            ) {
                 return cached
             }
             throw error
@@ -380,10 +385,13 @@ public enum CursorUsageReader {
             )
         }
 
-        let rawPlan = queryItemValue(database: database, key: "cursorAuth/stripeMembershipType")
-        let planName = AccountPlan.cursor(rawPlan)
+        let values = queryStateValues(
+            database: database,
+            keys: ["cursorAuth/stripeMembershipType", "cursorAuth/accessToken"]
+        )
+        let planName = AccountPlan.cursor(values["cursorAuth/stripeMembershipType"])
 
-        guard let rawToken = queryItemValue(database: database, key: "cursorAuth/accessToken") else {
+        guard let rawToken = values["cursorAuth/accessToken"] else {
             return LocalCursorState(
                 databaseExists: true,
                 plaintextAccessToken: nil,
@@ -409,30 +417,40 @@ public enum CursorUsageReader {
         )
     }
 
-    private static func queryItemValue(database: URL, key: String) -> String? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = [
-            "-readonly",
-            database.path,
-            "SELECT value FROM ItemTable WHERE key = '\(key)' LIMIT 1;",
-        ]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-        let data = (try? output.fileHandleForReading.readToEnd()) ?? Data()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let raw = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else { return nil }
-        if let encoded = raw.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode(String.self, from: encoded),
-           !decoded.isEmpty {
-            return decoded
+    private static func queryStateValues(database: URL, keys: [String]) -> [String: String] {
+        guard !keys.isEmpty else { return [:] }
+        let pairs = keys.map { key -> String in
+            let escaped = key.replacingOccurrences(of: "'", with: "''")
+            return "'\(escaped)', (SELECT value FROM ItemTable WHERE key = '\(escaped)' LIMIT 1)"
+        }.joined(separator: ", ")
+        let sql = "SELECT json_object(\(pairs));"
+
+        guard let rawOutput = SubprocessRunner.runString(
+            executable: URL(fileURLWithPath: "/usr/bin/sqlite3"),
+            arguments: ["-readonly", database.path, sql],
+            timeout: 5
+        ) else {
+            return [:]
         }
-        return raw
+        let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+
+        var resolved: [String: String] = [:]
+        for (key, rawValue) in dict {
+            guard let stringValue = (rawValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !stringValue.isEmpty else { continue }
+            if let encoded = stringValue.data(using: .utf8),
+               let unwrapped = try? JSONDecoder().decode(String.self, from: encoded),
+               !unwrapped.isEmpty {
+                resolved[key] = unwrapped
+            } else {
+                resolved[key] = stringValue
+            }
+        }
+        return resolved
     }
 
     private static func cursorVersion() -> String {
