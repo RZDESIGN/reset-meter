@@ -7,6 +7,7 @@ generated_assets="$project_dir/.build/reset-meter-assets"
 sign_identity="${RESET_METER_SIGN_IDENTITY:--}"
 
 cd "$project_dir"
+rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources" "$generated_assets"
 
 if [[ "${RESET_METER_BUILD_SYSTEM:-}" == "native" ]]; then
