@@ -460,9 +460,17 @@ final class UsageStore: ObservableObject {
             durationMinutes: 10_080,
             displayMode: .remaining
         )
+        let claudeFable = UsageLimit(
+            id: "claude-seven_day_fable",
+            label: "Weekly · Fable",
+            usedPercent: 72,
+            resetsAt: now.addingTimeInterval(496_740),
+            durationMinutes: 10_080,
+            displayMode: .remaining
+        )
         demoUsage[claudeDefault.id] = ProviderUsage(
             provider: .claude,
-            limits: [claudeFiveHour, claudeWeekly],
+            limits: [claudeFiveHour, claudeWeekly, claudeFable],
             updatedAt: now,
             sourceDescription: "Live local Claude usage",
             planName: "Max 20×"

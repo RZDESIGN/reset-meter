@@ -25,6 +25,80 @@ func claudeDoesNotInventUsageForMissingOrMalformedWindows(_ json: String) {
     #expect(throws: UsageReadError.self) { try ClaudeUsageReader.parse(data: Data(json.utf8), now: .now) }
 }
 
+@Test(arguments: [true, false])
+func claudeIncludesFableAlongsideLegacyWindowsRegardlessOfActiveFlag(_ isActive: Bool) throws {
+    let usage = try ClaudeUsageReader.parse(data: Data("""
+    {"five_hour":{"utilization":42,"resets_at":null},
+     "seven_day":{"utilization":56.5,"resets_at":"2026-11-21T14:00:00Z"},
+     "limits":[
+       {"kind":"weekly_all","group":"weekly","percent":57,"is_active":false},
+       {"kind":"weekly_scoped","group":"weekly","percent":82,"is_active":\(isActive),
+        "resets_at":"2026-11-21T14:00:00.123456+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}
+     ]}
+    """.utf8), now: .now)
+
+    #expect(usage.limits.map(\.label) == ["5-hour", "Weekly", "Weekly · Fable"])
+    #expect(usage.limits.map(\.usedPercent) == [42, 56.5, 82])
+    let fable = try #require(usage.limits.last)
+    #expect(fable.id == "claude-seven_day_fable")
+    #expect(fable.durationMinutes == 10_080)
+    #expect(fable.displayMode == .remaining)
+    #expect(fable.displayPercent == 18)
+    let expectedReset = try #require(ISO8601DateFormatter().date(from: "2026-11-21T14:00:00Z"))
+    #expect(abs(try #require(fable.resetsAt).timeIntervalSince(expectedReset) - 0.123456) < 0.001)
+    #expect(!fable.resetIsEstimated)
+    #expect(usage.headlinePercent == 18)
+}
+
+@Test func claudeReadsModernOnlyWindowsWithStableIDsAndNoDuplicates() throws {
+    let usage = try ClaudeUsageReader.parse(data: Data(#"""
+    {"limits":[
+      {"kind":"session","group":"session","percent":0,"is_active":false},
+      {"kind":"weekly_all","group":"weekly","percent":59,"is_active":false},
+      {"kind":"weekly_scoped","group":"weekly","percent":100,"is_active":true,
+       "scope":{"model":{"display_name":" Fable "}}},
+      {"kind":"weekly_scoped","group":"weekly","percent":100,"is_active":true,
+       "scope":{"model":{"display_name":"Fable"}}}
+    ]}
+    """#.utf8), now: .now)
+    #expect(usage.limits.map(\.id) == ["claude-five_hour", "claude-seven_day", "claude-seven_day_fable"])
+    #expect(usage.limits.map(\.label) == ["5-hour", "Weekly", "Weekly · Fable"])
+    #expect(usage.limits.map(\.durationMinutes) == [300, 10_080, 10_080])
+    #expect(usage.limits.map(\.displayPercent) == [100, 41, 0])
+    #expect(usage.headlinePercent == 0)
+}
+
+@Test(arguments: [
+    #"{"percent":null,"scope":{"model":{"display_name":"Fable"}}}"#,
+    #"{"percent":true,"scope":{"model":{"display_name":"Fable"}}}"#,
+    #"{"percent":"82","scope":{"model":{"display_name":"Fable"}}}"#,
+    #"{"percent":82,"scope":null}"#,
+    #"{"percent":82,"scope":{"model":{"display_name":"  "}}}"#,
+    #"{"percent":82,"scope":{"model":{"display_name":123}}}"#,
+    #"{"percent":82,"scope":{"model":null,"surface":{"display_name":"Cowork"}}}"#,
+])
+func claudeIgnoresMalformedModelWindows(_ json: String) throws {
+    var window = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    window["kind"] = "weekly_scoped"
+    window["group"] = "weekly"
+    let data = try JSONSerialization.data(withJSONObject: [
+        "seven_day": ["utilization": 30],
+        "limits": [window],
+    ])
+    let usage = try ClaudeUsageReader.parse(data: data, now: .now)
+    #expect(usage.limits.map(\.label) == ["Weekly"])
+    #expect(usage.headlinePercent == 70)
+}
+
+@Test func claudeDoesNotDuplicateLegacyModelQuotaOrInventMissingFable() throws {
+    let usage = try ClaudeUsageReader.parse(data: Data(#"""
+    {"seven_day_opus":{"utilization":30,"resets_at":null},
+     "limits":[{"kind":"weekly_scoped","percent":30,"scope":{"model":{"display_name":"Opus"}}}]}
+    """#.utf8), now: .now)
+    #expect(usage.limits.map(\.id) == ["claude-seven_day_opus"])
+    #expect(usage.limits.map(\.label) == ["Weekly · Opus"])
+}
+
 @Test func claudePlanAndMetadataParseAcrossTiersAndLocalConfig() {
     let profile = Data(#"{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}"#.utf8)
     #expect(ClaudeUsageReader.parsePlan(profile) == "Max 20×")
@@ -148,4 +222,29 @@ func claudeDoesNotInventUsageForMissingOrMalformedWindows(_ json: String) {
     )
     #expect(resolved.headlinePercent == 75)
     #expect(resolved.planName == "Max 20×")
+}
+
+@Test func claudeDesktopCachePreservesFableOnlyUntilItsVerifiedReset() throws {
+    let data = Data(#"{"version":2,"samples":[{"t":2000000,"org":"org-work","u":{"fh":0,"sd":25}}]}"#.utf8)
+    let fable = UsageLimit(
+        id: "claude-seven_day_fable", label: "Weekly · Fable", usedPercent: 82,
+        resetsAt: Date(timeIntervalSince1970: 10_000), durationMinutes: 10_080, displayMode: .remaining
+    )
+    let previous = ProviderUsage(
+        provider: .claude, limits: [fable], updatedAt: Date(timeIntervalSince1970: 1_500),
+        sourceDescription: "Live", planName: "Team"
+    )
+    let cached = try ClaudeDesktopUsageReader.parse(
+        data: data, now: Date(timeIntervalSince1970: 2_100), organizationUUID: "org-work", previousSnapshot: previous
+    )
+    #expect(cached.limits.map(\.label) == ["5-hour", "Weekly", "Weekly · Fable"])
+    #expect(cached.limits.last == fable)
+    #expect(cached.headlinePercent == 18)
+    #expect(cached.isStale)
+
+    let expired = try ClaudeDesktopUsageReader.parse(
+        data: data, now: Date(timeIntervalSince1970: 10_000), organizationUUID: "org-work", previousSnapshot: previous
+    )
+    #expect(expired.limits.map(\.label) == ["5-hour", "Weekly"])
+    #expect(expired.headlinePercent == 75)
 }

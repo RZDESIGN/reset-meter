@@ -54,6 +54,7 @@ If you run separate Personal and Work installations side by side on the same Mac
 
 - **Menu-bar display mode**: Choose **Bars & %**, **Bars Only**, or **% Only** in **Providers…** to fit smaller displays or MacBook notches cleanly, even with 5+ active meters.
 - **Subscription plans**: Account cards display the provider-reported plan pill (such as **Pro**, **Business Pro Lite**, **Max 20×**, **Team**, or **Google AI Ultra**) when available, without clutter when omitted.
+- **Claude model quotas**: Claude cards include **Weekly · Fable** and other model-specific weekly meters when reported, with remaining capacity and reset countdowns. These quotas also contribute to the menu-bar percentage; cached model readings remain available until their verified reset time.
 - **Codex banked resets & Antigravity AI credits**: Codex cards show available banked resets with expandable expiry countdowns; Antigravity cards surface available AI credits alongside model pool bars.
 - **Live vs. cached indicator**: A green dot indicates a live reading; an orange dot indicates a cached reading when an app is closed or idle. Hover the dot to inspect the exact source.
 - **Per-account visibility**: Toggle **Show** on any card in **Providers…** to hide or show individual accounts in the menu bar and popover without removing the profile.

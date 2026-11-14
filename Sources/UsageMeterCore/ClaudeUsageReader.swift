@@ -178,23 +178,49 @@ public enum ClaudeUsageReader {
             )
         }
 
-        // Fallback to active entries in modern `limits[]` array if legacy top-level windows were omitted.
-        if limits.isEmpty, let array = root["limits"] as? [[String: Any]] {
-            limits = array.enumerated().compactMap { index, item -> UsageLimit? in
-                if let active = item["is_active"] as? Bool, !active { return nil }
+        // Model-scoped windows (including Fable) live only in `limits[]`, even beside legacy windows.
+        if let array = root["limits"] as? [[String: Any]] {
+            let hasLegacyWindows = !limits.isEmpty
+            for (index, item) in array.enumerated() {
                 guard let number = item["percent"] as? NSNumber,
-                      CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else { return nil }
-                let group = (item["group"] as? String)?.lowercased()
-                let label = group == "weekly" ? "Weekly" : (group == "five_hour" ? "5-hour" : "Usage window")
-                let duration: Int? = group == "weekly" ? 10_080 : (group == "five_hour" ? 300 : nil)
-                return UsageLimit(
-                    id: "claude-limit-\(index)",
+                      CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else { continue }
+                let id: String
+                let label: String
+                let duration: Int?
+                switch item["kind"] as? String {
+                case "weekly_scoped":
+                    guard let scope = item["scope"] as? [String: Any],
+                          let model = scope["model"] as? [String: Any],
+                          let name = (model["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !name.isEmpty else { continue }
+                    id = "claude-seven_day_\(name.lowercased())"
+                    label = "Weekly · \(name)"
+                    duration = 10_080
+                case "session":
+                    id = "claude-five_hour"
+                    label = "5-hour"
+                    duration = 300
+                case "weekly_all":
+                    id = "claude-seven_day"
+                    label = "Weekly"
+                    duration = 10_080
+                default:
+                    guard !hasLegacyWindows, item["is_active"] as? Bool != false else { continue }
+                    let group = (item["group"] as? String)?.lowercased()
+                    id = "claude-limit-\(index)"
+                    label = group == "weekly" ? "Weekly" : (group == "five_hour" ? "5-hour" : "Usage window")
+                    duration = group == "weekly" ? 10_080 : (group == "five_hour" ? 300 : nil)
+                }
+                // `is_active` selects the currently limiting window; inactive quotas still have capacity.
+                guard !limits.contains(where: { $0.id == id }) else { continue }
+                limits.append(UsageLimit(
+                    id: id,
                     label: label,
                     usedPercent: number.doubleValue,
                     resetsAt: parseDate(item["resets_at"] as? String),
                     durationMinutes: duration,
                     displayMode: .remaining
-                )
+                ))
             }
         }
 

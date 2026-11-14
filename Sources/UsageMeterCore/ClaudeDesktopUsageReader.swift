@@ -103,7 +103,7 @@ enum ClaudeDesktopUsageReader {
 
         let sampleDate = Date(timeIntervalSince1970: latest.t / 1_000)
         let sampleAge = max(0, now.timeIntervalSince(sampleDate))
-        let limits = windows.compactMap { shortKey, liveID, label, duration -> UsageLimit? in
+        var limits = windows.compactMap { shortKey, liveID, label, duration -> UsageLimit? in
             guard let rawUsed = latest.u[shortKey], rawUsed.isFinite else { return nil }
             let previousReset = previousSnapshot?.limits
                 .first(where: { $0.id == liveID || $0.label == label })?
@@ -121,9 +121,17 @@ enum ClaudeDesktopUsageReader {
             )
         }
 
+        // Desktop history omits model-scoped windows; retain a live reading only until its verified reset.
+        let cachedModelLimits = previousSnapshot?.limits.filter { limit in
+            limit.id.hasPrefix("claude-seven_day_")
+                && !limits.contains(where: { $0.id == limit.id })
+                && (limit.resetsAt.map { $0 > now } ?? false)
+        } ?? []
+        limits.append(contentsOf: cachedModelLimits)
+
         guard !limits.isEmpty else { throw UsageReadError.claudeLocalUnavailable }
         let ageSeconds = max(0, now.timeIntervalSince(sampleDate))
-        let isStale = ageSeconds > freshThresholdSeconds || limits.allSatisfy { $0.resetsAt == nil }
+        let isStale = !cachedModelLimits.isEmpty || ageSeconds > freshThresholdSeconds || limits.allSatisfy { $0.resetsAt == nil }
         return ProviderUsage(
             provider: .claude,
             limits: limits,

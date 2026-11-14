@@ -211,7 +211,8 @@ import UsageMeterCore
 
     #expect(store.menuEntries.count == 6)
     #expect(store.menuGroups.map(\.provider) == [.codex, .claude, .antigravity, .cursor])
-    #expect(store.menuGroups.map(\.percents) == [[81, 71], [44, 82], [76], [68]])
+    #expect(store.menuGroups.map(\.percents) == [[81, 71], [28, 82], [76], [68]])
+    #expect(store.usageByID["claude:default"]?.limits.last?.label == "Weekly · Fable")
 
     store.setVisible(false, entryID: "codex:default")
     #expect(store.menuGroups.first?.percents == [71])
